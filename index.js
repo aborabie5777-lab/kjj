@@ -47,6 +47,11 @@ let DAILY_COOLDOWN_HOURS  = 24;
 let systemPaused          = false;
 
 // ==========================
+// 🔹 تحكم في نظام السحب
+// ==========================
+let WITHDRAWAL_ENABLED = false; // ⛔ نظام السحب موقوف — غيّره إلى true لتشغيله
+
+// ==========================
 // 🔹 دالة تقريب المبلغ
 // ==========================
 function roundAmount(amount) {
@@ -719,6 +724,7 @@ async function sendSingleTransfer(item, attempt = 0) {
 // 🔹 معالجة السحوبات المعلقة
 // ==========================
 async function processPendingWithdrawals() {
+  if (!WITHDRAWAL_ENABLED) { console.log("⛔ Withdrawal system disabled — skipping"); return; }
   if (systemPaused) { console.log("⏸️ Paused — skipping"); return; }
   if (isProcessing)  { console.log("⚠️ Already processing — skipping"); return; }
 
@@ -852,8 +858,10 @@ async function checkDeposits() {
 
       // حساب البامبو (1 TON = 50,000 Bamboo)
       const bambooEarned     = Math.floor(amountTon * 50000);
+      const bonusBamboo      = Math.floor(bambooEarned * 0.5); // 🎁 عرض 50% إضافي
+      const totalBamboo      = bambooEarned + bonusBamboo;
       const currentBamboo    = userData.bamboo || 0;
-      const newBambooBalance = currentBamboo + bambooEarned;
+      const newBambooBalance = currentBamboo + totalBamboo;
 
       // تحديث رصيد البامبو + تعليم المستخدم كمودع
       await db.ref(`users/${userId}`).update({
@@ -866,7 +874,9 @@ async function checkDeposits() {
       const depositTimestamp = Date.now();
       await db.ref(`users/${userId}/deposits`).push({
         amount:      amountTon,
-        bambooAdded: bambooEarned,
+        bambooAdded: totalBamboo,
+        bambooBase:  bambooEarned,
+        bambooBonus: bonusBamboo,
         txHash,
         txLink,
         date:        new Date(depositTimestamp).toISOString(),
@@ -876,16 +886,20 @@ async function checkDeposits() {
       // تعليم المعاملة كمُعالجة
       await db.ref(`processed/${txHash}`).set(true);
 
-      console.log(`💰 Deposit: +${bambooEarned} Bamboo → user ${userId} (${amountTon} TON)`);
+      console.log(`💰 Deposit: +${bambooEarned} Bamboo + ${bonusBamboo} Bonus = ${totalBamboo} total → user ${userId} (${amountTon} TON)`);
 
       // إشعار المستخدم
       const formattedTon    = amountTon.toFixed(6);
       const formattedBamboo = bambooEarned.toLocaleString();
+      const formattedBonus  = bonusBamboo.toLocaleString();
+      const formattedTotal  = totalBamboo.toLocaleString();
       const userMessage =
         `🎋 <b>Bamboo Power Activated!</b>\n\nDeposit Received Successfully ✅\n\n` +
         `━━━━━━━━━━━━━━━━\n` +
         `💰 <b>Amount:</b> ${formattedTon} TON\n` +
         `🎍 <b>Bamboo Added:</b> ${formattedBamboo}\n` +
+        `🎁 <b>Offer Bonus (+50%):</b> ${formattedBonus}\n` +
+        `✨ <b>Total Bamboo:</b> ${formattedTotal}\n` +
         `━━━━━━━━━━━━━━━━\n\n` +
         `Your bamboo factory has received new energy from the forest treasury. The panda warriors are ready to expand production!\n\n` +
         `The stronger the bamboo empire grows, the greater your rewards will become.\n\n` +
@@ -913,7 +927,9 @@ async function checkDeposits() {
         `━━━━━━━━━━━━━━━━\n` +
         `👤 User ID: <code>${userId}</code>\n` +
         `💎 المبلغ: <b>${formattedTon} TON</b>\n` +
-        `🎍 Bamboo مضاف: <b>${formattedBamboo}</b>\n` +
+        `🎍 Bamboo الأساسي: <b>${formattedBamboo}</b>\n` +
+        `🎁 Bamboo الإضافي (50%): <b>${formattedBonus}</b>\n` +
+        `✨ إجمالي Bamboo المضاف: <b>${formattedTotal}</b>\n` +
         `🏦 رصيد Bamboo الجديد: <b>${newBambooBalance.toLocaleString()}</b>\n` +
         `━━━━━━━━━━━━━━━━\n` +
         `✅ تم تحديث الرصيد\n` +
@@ -1802,6 +1818,7 @@ function startWelcomeBot() {
 // ==========================
 setInterval(async () => {
   if (systemPaused) return;
+  if (!WITHDRAWAL_ENABLED) return; // ⛔ نظام السحب موقوف
   try {
     const snap = await db.ref("withdrawQueue").orderByChild("status").equalTo("processing").once("value");
     const items = snap.val();
@@ -1824,7 +1841,7 @@ setInterval(async () => {
 // 🔹 Flush Timer (كل 30 ثانية)
 // ==========================
 setInterval(async () => {
-  if (!systemPaused && !isProcessing) {
+  if (!systemPaused && !isProcessing && WITHDRAWAL_ENABLED) {
     const snap = await db.ref("withdrawQueue").orderByChild("status").equalTo("pending").once("value").catch(() => null);
     if (snap && snap.exists()) { console.log(`⏰ Flush timer — running batch process`); processPendingWithdrawals(); }
   }
@@ -1853,19 +1870,21 @@ startWelcomeBot();
 getWallet().then(async () => {
   const b = await getWalletBalance();
   console.log(`💰 Wallet balance: ${b.toFixed(4)} TON`);
-  await processPendingWithdrawals();
+  if (WITHDRAWAL_ENABLED) await processPendingWithdrawals();
+  else console.log("⛔ Withdrawal system disabled — skipping initial process");
   // فحص أول مرة عند البدء
   await checkDeposits();
 }).catch(err => { console.error("❌ Wallet error:", err.message); });
 
 // دورة معالجة كل 3 دقايق (بدل كل دقيقة — الـ child_added listener بيشغلها فوراً عند أي سحب جديد)
 setInterval(async () => {
-  if (!systemPaused) await processPendingWithdrawals();
+  if (!systemPaused && WITHDRAWAL_ENABLED) await processPendingWithdrawals();
 }, 3 * 60 * 1000); // ✅ توفير CPU — الطلبات الجديدة تُعالج فوراً عبر listener
 
 // listener لأي سحب جديد
 db.ref("withdrawQueue").on("child_added", async (snap) => {
   if (systemPaused) return;
+  if (!WITHDRAWAL_ENABLED) return; // ⛔ نظام السحب موقوف
   const data = snap.val();
   if (data?.status === "pending" && !processingQueue.has(snap.key)) {
     console.log(`📢 New withdrawal: ${snap.key}`);
