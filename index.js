@@ -1022,6 +1022,9 @@ function startWelcomeBot() {
       `/userinfo [userId] — معلومات مستخدم كاملة\n` +
       `/addcoins [userId] [كمية] — إضافة Coins لمستخدم\n` +
       `/addbamboo [userId] [كمية] — إضافة Bamboo لمستخدم\n\n` +
+      `📨 <b>إرسال رسائل</b>\n` +
+      `/sendmsg [userId] — إرسال رسالة لمستخدم واحد\n` +
+      `/broadcast — إرسال رسالة لجميع المستخدمين\n\n` +
       `🕵️ <b>كشف التلاعب</b>\n` +
       `/check_suspicious — كشف محافظ مشتركة (+3 مستخدمين)\n` +
       `/reject_suspicious — رفض وحظر جميع المشبوهين\n` +
@@ -1738,356 +1741,123 @@ function startWelcomeBot() {
     } catch (e) { await adminReply(bot, msg.chat.id, `❌ ${e.message}`); }
   });
 
-  // ─── /broadcast ───────────────────────────────────────
-  // نظام البث الجماعي مع تتبع حالة الإرسال
-  // الاستخدام:
-  //   /broadcast نص الرسالة                  ← رسالة نصية للجميع
-  //   /broadcast_stop                         ← إيقاف البث الجاري
-  //   /broadcast_status                       ← حالة آخر عملية بث
-  // ─────────────────────────────────────────────────────
-  let broadcastActive    = false;   // هل يوجد بث جارٍ؟
-  let broadcastAbort     = false;   // طلب إيقاف
-  let broadcastStats     = null;    // آخر إحصائيات
+  // ─── /sendmsg [userId] — إرسال رسالة لمستخدم واحد ────
+  // ─── /broadcast       — إرسال رسالة لجميع المستخدمين ─
 
-  // ── دالة مساعدة: إرسال رسالة لمستخدم واحد عبر fetch ──
-  async function broadcastSendOne(chatId, text, photoUrl, replyMarkup) {
-    const token = process.env.TELEGRAM_BOT_TOKEN;
-    try {
-      let url, payload;
-      if (photoUrl) {
-        url = `https://api.telegram.org/bot${token}/sendPhoto`;
-        payload = { chat_id: chatId, photo: photoUrl, caption: text, parse_mode: 'HTML' };
-      } else {
-        url = `https://api.telegram.org/bot${token}/sendMessage`;
-        payload = { chat_id: chatId, text, parse_mode: 'HTML', disable_web_page_preview: true };
-      }
-      if (replyMarkup) payload.reply_markup = replyMarkup;
-      const res  = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-      const data = await res.json();
-      return data;
-    } catch (e) { return { ok: false, description: e.message }; }
-  }
+  // حالات المحادثة
+  const msgSessions = {}; // { chatId: { step, targetUserId, text, photo, buttons, isBroadcast } }
 
-  // ── تحديث رسالة الحالة كل N مستخدم ──
-  async function updateBroadcastStatusMsg(bot, chatId, msgId, stats, done = false) {
-    const elapsed   = Math.floor((Date.now() - stats.startTime) / 1000);
-    const processed = stats.sent + stats.failed;
-    const speed     = elapsed > 0 ? (processed / elapsed).toFixed(1) : '0';
-    const pct       = stats.total > 0 ? Math.round((processed / stats.total) * 100) : 0;
-    const bar       = '█'.repeat(Math.round(pct / 10)) + '░'.repeat(10 - Math.round(pct / 10));
-    const text =
-      `📡 <b>${done ? (broadcastAbort ? '🛑 تم إيقاف البث' : '✅ اكتمل البث') : '🔄 جاري البث...'}</b>\n\n` +
-      `[${bar}] ${pct}%\n\n` +
-      `✅ تم الإرسال: <b>${stats.sent}</b>\n` +
-      `❌ فشل: <b>${stats.failed}</b>\n` +
-      `⏳ المتبقي: <b>${stats.total - processed}</b>\n` +
-      `⚡ السرعة: <b>${speed}/ثانية</b>\n` +
-      `👥 الإجمالي: <b>${stats.total}</b>\n` +
-      `⏱ الوقت: <b>${elapsed}ث</b>` +
-      (done ? `\n\n${broadcastAbort ? '⛔ أُوقف البث يدوياً' : '🏁 انتهت عملية البث بنجاح'}` : '');
-    try {
-      await bot.editMessageText(text, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' });
-    } catch (e) { /* تجاهل خطأ "message not modified" */ }
-  }
-
-  // ── أمر /broadcast ──
-  bot.onText(/\/broadcast(?:\s+([\s\S]+))?/, async (msg, match) => {
-    if (!isAdmin(msg)) { await unauth(msg); return; }
-    if (broadcastActive) {
-      await adminReply(bot, msg.chat.id, '⚠️ يوجد بث جارٍ بالفعل. استخدم /broadcast_stop لإيقافه أو /broadcast_status لمتابعته.');
-      return;
-    }
-
-    const rawText = (match && match[1] ? match[1].trim() : '');
-
-    // إذا لم يُرسَل نص، اعرض تعليمات الاستخدام
-    if (!rawText) {
-      await adminReply(bot, msg.chat.id,
-        `📢 <b>نظام البث الجماعي</b>\n\n` +
-        `<b>الاستخدام:</b>\n` +
-        `/broadcast نص الرسالة\n\n` +
-        `<b>مثال:</b>\n` +
-        `/broadcast 🎉 مرحباً بالجميع! هذه رسالة جماعية.\n\n` +
-        `<b>أوامر أخرى:</b>\n` +
-        `/broadcast_stop — إيقاف البث\n` +
-        `/broadcast_status — حالة البث الجاري`
-      );
-      return;
-    }
-
-    // جلب كل المستخدمين من Firebase
-    let statusMsg;
-    try {
-      statusMsg = await bot.sendMessage(msg.chat.id, '⏳ جاري جلب قائمة المستخدمين من Firebase...', { parse_mode: 'HTML' });
-    } catch (e) { return; }
-
-    let userIds = [];
-    try {
-      const snap = await db.ref('users').once('value');
-      if (!snap.exists() || snap.numChildren() === 0) {
-        await bot.editMessageText('❌ لا يوجد مستخدمون في قاعدة البيانات.', { chat_id: msg.chat.id, message_id: statusMsg.message_id });
-        return;
-      }
-      snap.forEach(child => { userIds.push(child.key); });
-    } catch (e) {
-      await bot.editMessageText(`❌ خطأ في جلب المستخدمين: ${e.message}`, { chat_id: msg.chat.id, message_id: statusMsg.message_id });
-      return;
-    }
-
-    // تأكيد قبل البدء
-    broadcastActive = false;
-    broadcastAbort  = false;
-    try {
-      await bot.editMessageText(
-        `📋 <b>تأكيد البث</b>\n\n` +
-        `👥 عدد المستخدمين: <b>${userIds.length}</b>\n` +
-        `📝 الرسالة:\n<i>${rawText.substring(0, 300)}${rawText.length > 300 ? '...' : ''}</i>\n\n` +
-        `اضغط <b>إرسال للجميع</b> للبدء.`,
-        {
-          chat_id: msg.chat.id, message_id: statusMsg.message_id, parse_mode: 'HTML',
-          reply_markup: {
-            inline_keyboard: [[
-              { text: '🚀 إرسال للجميع', callback_data: `bc_confirm:${statusMsg.message_id}` },
-              { text: '❌ إلغاء',         callback_data: `bc_cancel:${statusMsg.message_id}` },
-            ]]
-          }
-        }
-      );
-      // تخزين البيانات مؤقتاً
-      bot._broadcastPending = { userIds, text: rawText, chatId: msg.chat.id, msgId: statusMsg.message_id };
-    } catch (e) { console.log('❌ broadcast confirm error:', e.message); }
-  });
-
-  // ── أمر /broadcast_stop ──
-  bot.onText(/\/broadcast_stop/, async (msg) => {
-    if (!isAdmin(msg)) { await unauth(msg); return; }
-    if (!broadcastActive) {
-      await adminReply(bot, msg.chat.id, '⚠️ لا يوجد بث جارٍ حالياً.');
-      return;
-    }
-    broadcastAbort = true;
-    await adminReply(bot, msg.chat.id, '🛑 تم إرسال طلب إيقاف البث. سيتوقف بعد المستخدم الحالي...');
-  });
-
-  // ── أمر /broadcast_status ──
-  bot.onText(/\/broadcast_status/, async (msg) => {
-    if (!isAdmin(msg)) { await unauth(msg); return; }
-    if (!broadcastActive && !broadcastStats) {
-      await adminReply(bot, msg.chat.id, 'ℹ️ لا يوجد بث جارٍ أو سابق في هذه الجلسة.');
-      return;
-    }
-    const stats   = broadcastStats;
-    const elapsed = Math.floor((Date.now() - stats.startTime) / 1000);
-    const processed = stats.sent + stats.failed;
-    const speed   = elapsed > 0 ? (processed / elapsed).toFixed(1) : '0';
-    const pct     = stats.total > 0 ? Math.round((processed / stats.total) * 100) : 0;
-    await adminReply(bot, msg.chat.id,
-      `📊 <b>حالة البث</b>\n\n` +
-      `🔄 الوضع: <b>${broadcastActive ? 'جارٍ' : (broadcastAbort ? 'متوقف يدوياً' : 'مكتمل')}</b>\n\n` +
-      `✅ تم الإرسال: <b>${stats.sent}</b>\n` +
-      `❌ فشل: <b>${stats.failed}</b>\n` +
-      `⏳ المتبقي: <b>${stats.total - processed}</b>\n` +
-      `⚡ السرعة: <b>${speed}/ثانية</b>\n` +
-      `👥 الإجمالي: <b>${stats.total}</b>\n` +
-      `⏱ الوقت المنقضي: <b>${elapsed}ث</b>\n` +
-      `📅 البدء: <b>${new Date(stats.startTime).toLocaleString('en-GB', { timeZone: 'UTC', hour12: false })} UTC</b>`
+  async function startMsgSession(bot, chatId, targetUserId, isBroadcast = false) {
+    msgSessions[chatId] = { step: 'text', targetUserId, text: null, photo: null, buttons: [], isBroadcast };
+    const header = isBroadcast
+      ? `📢 <b>إرسال رسالة لجميع المستخدمين</b>`
+      : `📩 <b>إرسال رسالة للمستخدم</b> <code>${targetUserId}</code>`;
+    await adminReply(bot, chatId,
+      `${header}\n\n` +
+      `<b>الخطوة 1 — اكتب نص الرسالة:</b>\n` +
+      `(يمكنك استخدام HTML مثل <code>&lt;b&gt;نص&lt;/b&gt;</code>)\n\n` +
+      `اكتب /cancel للإلغاء`
     );
-  });
-
-  // ══════════════════════════════════════════════════════
-  // 📨 نظام إرسال رسالة لمستخدم واحد — متعدد الخطوات
-  // ══════════════════════════════════════════════════════
-  // الخطوات:
-  //   1) /sendmsg [userId]          ← تحديد المستخدم
-  //   2) البوت يطلب النص
-  //   3) البوت يطلب صورة (اختياري — skip لتخطي)
-  //   4) البوت يطلب الأزرار (اختياري — skip لتخطي)
-  //      صيغة الأزرار: اسم الزر | https://رابط
-  //      يمكن إضافة أكثر من زر بفصلهم بسطر جديد
-  //   5) معاينة ثم إرسال
-  // ──────────────────────────────────────────────────────
-
-  // تخزين حالة المحادثة لكل أدمن
-  if (!bot._sendmsgSessions) bot._sendmsgSessions = {};
-
-  // دالة مساعدة: تنفيذ الإرسال الفعلي للمستخدم
-  async function executeSendMsg(bot, adminChatId, session) {
-    const { userId, text, photoUrl, buttons } = session;
-    const token = process.env.TELEGRAM_BOT_TOKEN;
-
-    // بناء reply_markup لو في أزرار
-    let replyMarkup = null;
-    if (buttons && buttons.length > 0) {
-      replyMarkup = {
-        inline_keyboard: buttons.map(b => [{ text: b.label, url: b.url }])
-      };
-    }
-
-    try {
-      let res, payload;
-      if (photoUrl) {
-        payload = { chat_id: userId, photo: photoUrl, caption: text, parse_mode: 'HTML' };
-        if (replyMarkup) payload.reply_markup = replyMarkup;
-        res = await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        });
-      } else {
-        payload = { chat_id: userId, text, parse_mode: 'HTML', disable_web_page_preview: false };
-        if (replyMarkup) payload.reply_markup = replyMarkup;
-        res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        });
-      }
-      const data = await res.json();
-      return data;
-    } catch (e) { return { ok: false, description: e.message }; }
   }
 
-  // ── الخطوة 1: /sendmsg [userId] ──
-  bot.onText(/\/sendmsg(?:\s+(\S+))?$/, async (msg, match) => {
+  bot.onText(/\/sendmsg(?:\s+(\d+))?/, async (msg, match) => {
     if (!isAdmin(msg)) { await unauth(msg); return; }
     const userId = match && match[1] ? match[1].trim() : null;
-
     if (!userId) {
-      await adminReply(bot, msg.chat.id,
-        `📨 <b>إرسال رسالة لمستخدم</b>\n\n` +
-        `<b>الاستخدام:</b>\n` +
-        `/sendmsg [userId]\n\n` +
-        `<b>مثال:</b>\n` +
-        `/sendmsg 123456789`
-      );
+      await adminReply(bot, msg.chat.id, `❌ الاستخدام: /sendmsg [userId]\nمثال: /sendmsg 6970148965`);
       return;
     }
-
-    // التحقق من وجود المستخدم
-    try {
-      const userSnap = await db.ref(`users/${userId}`).once('value');
-      if (!userSnap.exists()) {
-        await adminReply(bot, msg.chat.id, `⚠️ المستخدم <code>${userId}</code> غير موجود في Firebase، لكن سنكمل.`);
-      }
-    } catch (e) {}
-
-    // إنشاء session
-    bot._sendmsgSessions[msg.chat.id] = { step: 'awaiting_text', userId };
-
-    await adminReply(bot, msg.chat.id,
-      `📨 <b>إرسال لـ</b> <code>${userId}</code>\n\n` +
-      `<b>الخطوة 1/3 — اكتب نص الرسالة:</b>\n` +
-      `(يدعم HTML: <code>&lt;b&gt;عريض&lt;/b&gt;</code>، <code>&lt;i&gt;مائل&lt;/i&gt;</code>، <code>&lt;code&gt;كود&lt;/code&gt;</code>)\n\n` +
-      `أرسل /cancel_sendmsg للإلغاء`
-    );
+    await startMsgSession(bot, msg.chat.id, userId, false);
   });
 
-  // ── إلغاء ──
-  bot.onText(/\/cancel_sendmsg/, async (msg) => {
+  bot.onText(/\/broadcast/, async (msg) => {
+    if (!isAdmin(msg)) { await unauth(msg); return; }
+    await startMsgSession(bot, msg.chat.id, null, true);
+  });
+
+  bot.onText(/\/cancel/, async (msg) => {
     if (!isAdmin(msg)) return;
-    if (bot._sendmsgSessions[msg.chat.id]) {
-      delete bot._sendmsgSessions[msg.chat.id];
-      await adminReply(bot, msg.chat.id, '❌ تم إلغاء إرسال الرسالة.');
+    if (msgSessions[msg.chat.id]) {
+      delete msgSessions[msg.chat.id];
+      await adminReply(bot, msg.chat.id, `❌ تم إلغاء إرسال الرسالة`);
     }
   });
 
-  // ── معالجة خطوات المحادثة ──
+  // معالج الرسائل لخطوات sendmsg / broadcast
   bot.on('message', async (msg) => {
-    if (msg.chat.id.toString() !== ADMIN_CHAT_ID) return;
-    const session = bot._sendmsgSessions && bot._sendmsgSessions[msg.chat.id];
+    const chatId  = msg.chat.id.toString();
+    if (chatId !== ADMIN_CHAT_ID) return;
+    const session = msgSessions[chatId];
     if (!session) return;
-    // تجاهل الأوامر (تبدأ بـ /)
-    if (msg.text && msg.text.startsWith('/')) return;
+    const text = msg.text || '';
 
-    const token = process.env.TELEGRAM_BOT_TOKEN;
-
-    // ── الخطوة 2: استقبال النص ──
-    if (session.step === 'awaiting_text') {
-      if (!msg.text || !msg.text.trim()) {
-        await adminReply(bot, msg.chat.id, '⚠️ أرسل نصاً للرسالة.');
-        return;
-      }
-      session.text = msg.text.trim();
-      session.step = 'awaiting_photo';
+    // ── الخطوة 1: نص الرسالة ──────────────────────────
+    if (session.step === 'text') {
+      if (!text || text.startsWith('/')) return; // تجاهل الأوامر
+      session.text = text;
+      session.step = 'photo';
       await adminReply(bot, msg.chat.id,
         `✅ تم حفظ النص.\n\n` +
-        `<b>الخطوة 2/3 — أرسل رابط الصورة (اختياري):</b>\n` +
-        `<code>https://example.com/image.jpg</code>\n\n` +
-        `أو أرسل <b>skip</b> للتخطي بدون صورة`
+        `<b>الخطوة 2 — أرسل رابط صورة (URL) أو اكتب:</b>\n<code>skip</code> بدون صورة`
       );
       return;
     }
 
-    // ── الخطوة 3: استقبال الصورة ──
-    if (session.step === 'awaiting_photo') {
-      const txt = msg.text ? msg.text.trim() : '';
-      if (txt.toLowerCase() === 'skip' || txt === '') {
-        session.photoUrl = null;
-      } else if (txt.startsWith('http')) {
-        session.photoUrl = txt;
+    // ── الخطوة 2: الصورة ──────────────────────────────
+    if (session.step === 'photo') {
+      if (text.toLowerCase() === 'skip') {
+        session.photo = null;
       } else {
-        await adminReply(bot, msg.chat.id, '⚠️ أرسل رابط صحيح يبدأ بـ https:// أو أرسل <b>skip</b>');
-        return;
+        session.photo = text.trim();
       }
-      session.step = 'awaiting_buttons';
+      session.step = 'buttons';
       await adminReply(bot, msg.chat.id,
-        `✅ ${session.photoUrl ? 'تم حفظ الصورة.' : 'بدون صورة.'}\n\n` +
-        `<b>الخطوة 3/3 — أضف أزرار (اختياري):</b>\n\n` +
-        `صيغة كل زر في سطر منفصل:\n` +
-        `<code>اسم الزر | https://الرابط</code>\n\n` +
-        `مثال:\n` +
-        `<code>🐼 افتح التطبيق | https://t.me/PandaBamboBot\n` +
-        `🎁 احصل على مكافأة | https://t.me/PandaBamboBot?start=bonus</code>\n\n` +
-        `أو أرسل <b>skip</b> بدون أزرار`
+        `✅ تم.\n\n` +
+        `<b>الخطوة 3 — أضف أزرار (كل زر في سطر):</b>\n` +
+        `الصيغة: <code>نص الزر | الرابط</code>\n` +
+        `مثال:\n<code>🐼 افتح التطبيق | https://t.me/PandaBamboBot</code>\n\n` +
+        `أو اكتب <code>skip</code> بدون أزرار`
       );
       return;
     }
 
-    // ── الخطوة 4: استقبال الأزرار ──
-    if (session.step === 'awaiting_buttons') {
-      const txt = msg.text ? msg.text.trim() : '';
-      if (txt.toLowerCase() === 'skip' || txt === '') {
-        session.buttons = [];
-      } else {
-        const lines = txt.split('\n').map(l => l.trim()).filter(Boolean);
-        const parsed = [];
-        const invalid = [];
+    // ── الخطوة 3: الأزرار ─────────────────────────────
+    if (session.step === 'buttons') {
+      if (text.toLowerCase() !== 'skip') {
+        const lines   = text.split('\n').map(l => l.trim()).filter(Boolean);
+        const buttons = [];
         for (const line of lines) {
-          const parts = line.split('|').map(p => p.trim());
-          if (parts.length < 2 || !parts[1].startsWith('http')) {
-            invalid.push(line);
-          } else {
-            parsed.push({ label: parts[0], url: parts[1] });
+          const parts = line.split('|');
+          if (parts.length >= 2) {
+            const label = parts[0].trim();
+            const url   = parts.slice(1).join('|').trim();
+            if (label && url) buttons.push([{ text: label, url }]);
           }
         }
-        if (invalid.length > 0) {
-          await adminReply(bot, msg.chat.id,
-            `⚠️ هذه الأزرار غير صحيحة (تأكد من وجود | والرابط):\n` +
-            invalid.map(l => `• <code>${l}</code>`).join('\n') +
-            `\n\nأعد الإرسال أو أرسل <b>skip</b>`
-          );
-          return;
-        }
-        session.buttons = parsed;
+        session.buttons = buttons;
+      } else {
+        session.buttons = [];
       }
+      session.step = 'preview';
 
-      // ── معاينة الرسالة ──
-      session.step = 'confirming';
-      const btnPreview = session.buttons.length > 0
-        ? '\n\n🔘 <b>الأزرار:</b>\n' + session.buttons.map(b => `• ${b.label} → ${b.url}`).join('\n')
-        : '\n\nبدون أزرار';
+      // ── عرض المعاينة ──────────────────────────────
+      const targetLabel = session.isBroadcast
+        ? `📢 <b>لجميع المستخدمين</b>`
+        : `👤 <b>${session.targetUserId}</b>`;
 
       await adminReply(bot, msg.chat.id,
-        `👁 <b>معاينة الرسالة</b>\n` +
+        `🔍 <b>معاينة الرسالة</b>\n` +
         `${'━'.repeat(30)}\n` +
-        `👤 إلى: <code>${session.userId}</code>\n` +
-        `${session.photoUrl ? `🖼 صورة: ${session.photoUrl.substring(0, 60)}...\n` : ''}` +
-        `📝 النص:\n${session.text.substring(0, 500)}${session.text.length > 500 ? '...' : ''}` +
-        btnPreview +
-        `\n${'━'.repeat(30)}`,
+        `📬 المستقبل: ${targetLabel}\n` +
+        (session.photo ? `🖼 صورة: <a href="${session.photo}">رابط الصورة</a>\n` : `🖼 صورة: لا يوجد\n`) +
+        `🔘 أزرار: ${session.buttons.length > 0 ? session.buttons.map(r => r.map(b => b.text).join(' | ')).join(' / ') : 'لا يوجد'}\n` +
+        `${'━'.repeat(30)}\n\n` +
+        `📝 <b>النص:</b>\n${session.text}`,
         {
           reply_markup: {
             inline_keyboard: [[
-              { text: '✅ إرسال الآن', callback_data: `sm_confirm:${msg.chat.id}` },
-              { text: '❌ إلغاء',      callback_data: `sm_cancel:${msg.chat.id}`  },
+              { text: '✅ إرسال الآن', callback_data: `do_send_msg:${chatId}` },
+              { text: '❌ إلغاء',      callback_data: `cancel_send_msg:${chatId}` },
             ]]
           }
         }
@@ -2109,89 +1879,79 @@ function startWelcomeBot() {
     if (query.message.chat.id.toString() !== ADMIN_CHAT_ID) return;
     const data   = query.data || '';
     const chatId = query.message.chat.id;
-    const msgId  = query.message.message_id;
 
-    // ── تأكيد إرسال sendmsg ──
-    if (data.startsWith('sm_confirm:')) {
-      await bot.answerCallbackQuery(query.id, { text: '📨 جاري الإرسال...' });
-      const session = bot._sendmsgSessions && bot._sendmsgSessions[chatId];
-      if (!session || session.step !== 'confirming') {
-        await bot.editMessageText('❌ انتهت صلاحية الطلب.', { chat_id: chatId, message_id: msgId, reply_markup: { inline_keyboard: [] } }).catch(() => {});
-        return;
-      }
-      delete bot._sendmsgSessions[chatId];
-      const result = await executeSendMsg(bot, chatId, session);
-      if (result && result.ok) {
-        await bot.editMessageText(
-          query.message.text + `\n\n✅ <b>تم الإرسال بنجاح!</b>`,
-          { chat_id: chatId, message_id: msgId, parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } }
-        ).catch(() => {});
-        console.log(`📨 sendmsg OK → user ${session.userId}`);
-      } else {
-        const errMsg = result?.description || 'خطأ غير معروف';
-        const blockedNote = errMsg.includes('blocked') ? '\n🚫 المستخدم حظر البوت' : '';
-        await bot.editMessageText(
-          query.message.text + `\n\n❌ <b>فشل الإرسال:</b> <code>${errMsg}</code>${blockedNote}`,
-          { chat_id: chatId, message_id: msgId, parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } }
-        ).catch(() => {});
-      }
-      return;
-    }
-
-    // ── إلغاء sendmsg ──
-    if (data.startsWith('sm_cancel:')) {
+    // ── إلغاء الإرسال ─────────────────────────────────
+    if (data.startsWith('cancel_send_msg:')) {
+      const sid = data.replace('cancel_send_msg:', '').trim();
+      delete msgSessions[sid];
       await bot.answerCallbackQuery(query.id, { text: '❌ تم الإلغاء' });
-      if (bot._sendmsgSessions) delete bot._sendmsgSessions[chatId];
-      await bot.editMessageText('❌ تم إلغاء إرسال الرسالة.', { chat_id: chatId, message_id: msgId, reply_markup: { inline_keyboard: [] } }).catch(() => {});
+      await bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: chatId, message_id: query.message.message_id }).catch(() => {});
+      await adminReply(bot, chatId, '❌ تم إلغاء الإرسال');
       return;
     }
 
-    // ── تأكيد البث ──
-    if (data.startsWith('bc_confirm:')) {
-      await bot.answerCallbackQuery(query.id, { text: '🚀 جاري بدء البث...' });
-      const pending = bot._broadcastPending;
-      if (!pending) {
-        await bot.editMessageText('❌ انتهت صلاحية طلب البث. أعد المحاولة.', { chat_id: chatId, message_id: msgId }).catch(() => {});
-        return;
-      }
-      bot._broadcastPending = null;
-      broadcastActive = true;
-      broadcastAbort  = false;
-      const { userIds, text: bcText } = pending;
-      const stats = { sent: 0, failed: 0, total: userIds.length, startTime: Date.now() };
-      broadcastStats = stats;
+    // ── إرسال الرسالة ─────────────────────────────────
+    if (data.startsWith('do_send_msg:')) {
+      const sid     = data.replace('do_send_msg:', '').trim();
+      const session = msgSessions[sid];
+      if (!session) { await bot.answerCallbackQuery(query.id, { text: '❌ انتهت الجلسة' }); return; }
+      delete msgSessions[sid];
 
-      // تحديث الرسالة الأولى
-      await updateBroadcastStatusMsg(bot, chatId, msgId, stats, false).catch(() => {});
+      await bot.answerCallbackQuery(query.id, { text: '📤 جاري الإرسال...' });
+      await bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: chatId, message_id: query.message.message_id }).catch(() => {});
 
-      const UPDATE_EVERY = 10; // تحديث رسالة الحالة كل 10 مستخدمين
-      for (let i = 0; i < userIds.length; i++) {
-        if (broadcastAbort) break;
-        const uid = userIds[i];
-        const res = await broadcastSendOne(uid, bcText, null, null);
-        if (res && res.ok) { stats.sent++; }
-        else               { stats.failed++; console.log(`📢 BC fail [${uid}]: ${res?.description || '?'}`); }
-        // تحديث رسالة الحالة دورياً
-        if ((i + 1) % UPDATE_EVERY === 0 || i === userIds.length - 1) {
-          await updateBroadcastStatusMsg(bot, chatId, msgId, stats, false).catch(() => {});
-        }
-        // تأخير بسيط لتجنب rate limit (35 رسالة/ثانية حد تيليجرام)
-        await new Promise(r => setTimeout(r, 35));
+      const { text: msgText, photo, buttons, isBroadcast, targetUserId } = session;
+      const replyMarkup = buttons.length > 0 ? { inline_keyboard: buttons } : undefined;
+
+      // دالة مساعدة ترسل لمستخدم واحد
+      async function sendToUser(uid) {
+        try {
+          if (photo) {
+            await bot.sendPhoto(uid, photo, { caption: msgText, parse_mode: 'HTML', ...(replyMarkup ? { reply_markup: replyMarkup } : {}) });
+          } else {
+            await bot.sendMessage(uid, msgText, { parse_mode: 'HTML', disable_web_page_preview: true, ...(replyMarkup ? { reply_markup: replyMarkup } : {}) });
+          }
+          return true;
+        } catch (e) { return false; }
       }
 
-      broadcastActive = false;
-      await updateBroadcastStatusMsg(bot, chatId, msgId, stats, true).catch(() => {});
-      console.log(`📢 Broadcast done: ✅${stats.sent} ❌${stats.failed} total=${stats.total}`);
+      if (!isBroadcast) {
+        // ── إرسال لمستخدم واحد ──────────────────────
+        const ok = await sendToUser(targetUserId);
+        await adminReply(bot, chatId,
+          ok
+            ? `✅ <b>تم إرسال الرسالة بنجاح</b> للمستخدم <code>${targetUserId}</code>`
+            : `❌ <b>فشل الإرسال</b> للمستخدم <code>${targetUserId}</code> — تحقق من الـ chat ID`
+        );
+      } else {
+        // ── بث لجميع المستخدمين ──────────────────────
+        await adminReply(bot, chatId, '📢 <b>جاري إرسال الرسالة لجميع المستخدمين...</b>');
+        try {
+          const usersSnap = await db.ref('users').once('value');
+          const users     = usersSnap.val() || {};
+          const userIds   = Object.keys(users);
+          let sent = 0, failed = 0;
+          for (let i = 0; i < userIds.length; i++) {
+            const ok = await sendToUser(userIds[i]);
+            if (ok) sent++; else failed++;
+            // تحديث كل 50 مستخدم
+            if ((i + 1) % 50 === 0) {
+              await adminReply(bot, chatId, `📊 تقدم: ${i + 1}/${userIds.length} — ✅ ${sent} | ❌ ${failed}`);
+            }
+            // تأخير بسيط لتجنب flood
+            await new Promise(r => setTimeout(r, 50));
+          }
+          await adminReply(bot, chatId,
+            `🎉 <b>انتهى البث</b>\n\n` +
+            `👥 إجمالي المستخدمين: <b>${userIds.length}</b>\n` +
+            `✅ تم الإرسال: <b>${sent}</b>\n` +
+            `❌ فشل: <b>${failed}</b>`
+          );
+        } catch (e) { await adminReply(bot, chatId, `❌ خطأ في البث: ${e.message}`); }
+      }
       return;
     }
-
-    // ── إلغاء البث ──
-    if (data.startsWith('bc_cancel:')) {
-      await bot.answerCallbackQuery(query.id, { text: '❌ تم إلغاء البث' });
-      bot._broadcastPending = null;
-      await bot.editMessageText('❌ تم إلغاء عملية البث.', { chat_id: chatId, message_id: msgId }).catch(() => {});
-      return;
-    }
+    const msgId  = query.message.message_id;
 
     if (data.startsWith('ban_user:')) {
       const uid = data.replace('ban_user:', '').trim();
