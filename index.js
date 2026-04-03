@@ -1738,6 +1738,162 @@ function startWelcomeBot() {
     } catch (e) { await adminReply(bot, msg.chat.id, `❌ ${e.message}`); }
   });
 
+  // ─── /broadcast ───────────────────────────────────────
+  // نظام البث الجماعي مع تتبع حالة الإرسال
+  // الاستخدام:
+  //   /broadcast نص الرسالة                  ← رسالة نصية للجميع
+  //   /broadcast_stop                         ← إيقاف البث الجاري
+  //   /broadcast_status                       ← حالة آخر عملية بث
+  // ─────────────────────────────────────────────────────
+  let broadcastActive    = false;   // هل يوجد بث جارٍ؟
+  let broadcastAbort     = false;   // طلب إيقاف
+  let broadcastStats     = null;    // آخر إحصائيات
+
+  // ── دالة مساعدة: إرسال رسالة لمستخدم واحد عبر fetch ──
+  async function broadcastSendOne(chatId, text, photoUrl, replyMarkup) {
+    const token = process.env.TELEGRAM_BOT_TOKEN;
+    try {
+      let url, payload;
+      if (photoUrl) {
+        url = `https://api.telegram.org/bot${token}/sendPhoto`;
+        payload = { chat_id: chatId, photo: photoUrl, caption: text, parse_mode: 'HTML' };
+      } else {
+        url = `https://api.telegram.org/bot${token}/sendMessage`;
+        payload = { chat_id: chatId, text, parse_mode: 'HTML', disable_web_page_preview: true };
+      }
+      if (replyMarkup) payload.reply_markup = replyMarkup;
+      const res  = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      const data = await res.json();
+      return data;
+    } catch (e) { return { ok: false, description: e.message }; }
+  }
+
+  // ── تحديث رسالة الحالة كل N مستخدم ──
+  async function updateBroadcastStatusMsg(bot, chatId, msgId, stats, done = false) {
+    const elapsed   = Math.floor((Date.now() - stats.startTime) / 1000);
+    const processed = stats.sent + stats.failed;
+    const speed     = elapsed > 0 ? (processed / elapsed).toFixed(1) : '0';
+    const pct       = stats.total > 0 ? Math.round((processed / stats.total) * 100) : 0;
+    const bar       = '█'.repeat(Math.round(pct / 10)) + '░'.repeat(10 - Math.round(pct / 10));
+    const text =
+      `📡 <b>${done ? (broadcastAbort ? '🛑 تم إيقاف البث' : '✅ اكتمل البث') : '🔄 جاري البث...'}</b>\n\n` +
+      `[${bar}] ${pct}%\n\n` +
+      `✅ تم الإرسال: <b>${stats.sent}</b>\n` +
+      `❌ فشل: <b>${stats.failed}</b>\n` +
+      `⏳ المتبقي: <b>${stats.total - processed}</b>\n` +
+      `⚡ السرعة: <b>${speed}/ثانية</b>\n` +
+      `👥 الإجمالي: <b>${stats.total}</b>\n` +
+      `⏱ الوقت: <b>${elapsed}ث</b>` +
+      (done ? `\n\n${broadcastAbort ? '⛔ أُوقف البث يدوياً' : '🏁 انتهت عملية البث بنجاح'}` : '');
+    try {
+      await bot.editMessageText(text, { chat_id: chatId, message_id: msgId, parse_mode: 'HTML' });
+    } catch (e) { /* تجاهل خطأ "message not modified" */ }
+  }
+
+  // ── أمر /broadcast ──
+  bot.onText(/\/broadcast(?:\s+([\s\S]+))?/, async (msg, match) => {
+    if (!isAdmin(msg)) { await unauth(msg); return; }
+    if (broadcastActive) {
+      await adminReply(bot, msg.chat.id, '⚠️ يوجد بث جارٍ بالفعل. استخدم /broadcast_stop لإيقافه أو /broadcast_status لمتابعته.');
+      return;
+    }
+
+    const rawText = (match && match[1] ? match[1].trim() : '');
+
+    // إذا لم يُرسَل نص، اعرض تعليمات الاستخدام
+    if (!rawText) {
+      await adminReply(bot, msg.chat.id,
+        `📢 <b>نظام البث الجماعي</b>\n\n` +
+        `<b>الاستخدام:</b>\n` +
+        `/broadcast نص الرسالة\n\n` +
+        `<b>مثال:</b>\n` +
+        `/broadcast 🎉 مرحباً بالجميع! هذه رسالة جماعية.\n\n` +
+        `<b>أوامر أخرى:</b>\n` +
+        `/broadcast_stop — إيقاف البث\n` +
+        `/broadcast_status — حالة البث الجاري`
+      );
+      return;
+    }
+
+    // جلب كل المستخدمين من Firebase
+    let statusMsg;
+    try {
+      statusMsg = await bot.sendMessage(msg.chat.id, '⏳ جاري جلب قائمة المستخدمين من Firebase...', { parse_mode: 'HTML' });
+    } catch (e) { return; }
+
+    let userIds = [];
+    try {
+      const snap = await db.ref('users').once('value');
+      if (!snap.exists() || snap.numChildren() === 0) {
+        await bot.editMessageText('❌ لا يوجد مستخدمون في قاعدة البيانات.', { chat_id: msg.chat.id, message_id: statusMsg.message_id });
+        return;
+      }
+      snap.forEach(child => { userIds.push(child.key); });
+    } catch (e) {
+      await bot.editMessageText(`❌ خطأ في جلب المستخدمين: ${e.message}`, { chat_id: msg.chat.id, message_id: statusMsg.message_id });
+      return;
+    }
+
+    // تأكيد قبل البدء
+    broadcastActive = false;
+    broadcastAbort  = false;
+    try {
+      await bot.editMessageText(
+        `📋 <b>تأكيد البث</b>\n\n` +
+        `👥 عدد المستخدمين: <b>${userIds.length}</b>\n` +
+        `📝 الرسالة:\n<i>${rawText.substring(0, 300)}${rawText.length > 300 ? '...' : ''}</i>\n\n` +
+        `اضغط <b>إرسال للجميع</b> للبدء.`,
+        {
+          chat_id: msg.chat.id, message_id: statusMsg.message_id, parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [[
+              { text: '🚀 إرسال للجميع', callback_data: `bc_confirm:${statusMsg.message_id}` },
+              { text: '❌ إلغاء',         callback_data: `bc_cancel:${statusMsg.message_id}` },
+            ]]
+          }
+        }
+      );
+      // تخزين البيانات مؤقتاً
+      bot._broadcastPending = { userIds, text: rawText, chatId: msg.chat.id, msgId: statusMsg.message_id };
+    } catch (e) { console.log('❌ broadcast confirm error:', e.message); }
+  });
+
+  // ── أمر /broadcast_stop ──
+  bot.onText(/\/broadcast_stop/, async (msg) => {
+    if (!isAdmin(msg)) { await unauth(msg); return; }
+    if (!broadcastActive) {
+      await adminReply(bot, msg.chat.id, '⚠️ لا يوجد بث جارٍ حالياً.');
+      return;
+    }
+    broadcastAbort = true;
+    await adminReply(bot, msg.chat.id, '🛑 تم إرسال طلب إيقاف البث. سيتوقف بعد المستخدم الحالي...');
+  });
+
+  // ── أمر /broadcast_status ──
+  bot.onText(/\/broadcast_status/, async (msg) => {
+    if (!isAdmin(msg)) { await unauth(msg); return; }
+    if (!broadcastActive && !broadcastStats) {
+      await adminReply(bot, msg.chat.id, 'ℹ️ لا يوجد بث جارٍ أو سابق في هذه الجلسة.');
+      return;
+    }
+    const stats   = broadcastStats;
+    const elapsed = Math.floor((Date.now() - stats.startTime) / 1000);
+    const processed = stats.sent + stats.failed;
+    const speed   = elapsed > 0 ? (processed / elapsed).toFixed(1) : '0';
+    const pct     = stats.total > 0 ? Math.round((processed / stats.total) * 100) : 0;
+    await adminReply(bot, msg.chat.id,
+      `📊 <b>حالة البث</b>\n\n` +
+      `🔄 الوضع: <b>${broadcastActive ? 'جارٍ' : (broadcastAbort ? 'متوقف يدوياً' : 'مكتمل')}</b>\n\n` +
+      `✅ تم الإرسال: <b>${stats.sent}</b>\n` +
+      `❌ فشل: <b>${stats.failed}</b>\n` +
+      `⏳ المتبقي: <b>${stats.total - processed}</b>\n` +
+      `⚡ السرعة: <b>${speed}/ثانية</b>\n` +
+      `👥 الإجمالي: <b>${stats.total}</b>\n` +
+      `⏱ الوقت المنقضي: <b>${elapsed}ث</b>\n` +
+      `📅 البدء: <b>${new Date(stats.startTime).toLocaleString('en-GB', { timeZone: 'UTC', hour12: false })} UTC</b>`
+    );
+  });
+
   // ─── Callbacks ────────────────────────────────────────
   bot.on('callback_query', async (query) => {
     if (query.message.chat.id.toString() !== ADMIN_CHAT_ID) return;
@@ -1752,6 +1908,53 @@ function startWelcomeBot() {
     const data   = query.data || '';
     const chatId = query.message.chat.id;
     const msgId  = query.message.message_id;
+
+    // ── تأكيد البث ──
+    if (data.startsWith('bc_confirm:')) {
+      await bot.answerCallbackQuery(query.id, { text: '🚀 جاري بدء البث...' });
+      const pending = bot._broadcastPending;
+      if (!pending) {
+        await bot.editMessageText('❌ انتهت صلاحية طلب البث. أعد المحاولة.', { chat_id: chatId, message_id: msgId }).catch(() => {});
+        return;
+      }
+      bot._broadcastPending = null;
+      broadcastActive = true;
+      broadcastAbort  = false;
+      const { userIds, text: bcText } = pending;
+      const stats = { sent: 0, failed: 0, total: userIds.length, startTime: Date.now() };
+      broadcastStats = stats;
+
+      // تحديث الرسالة الأولى
+      await updateBroadcastStatusMsg(bot, chatId, msgId, stats, false).catch(() => {});
+
+      const UPDATE_EVERY = 10; // تحديث رسالة الحالة كل 10 مستخدمين
+      for (let i = 0; i < userIds.length; i++) {
+        if (broadcastAbort) break;
+        const uid = userIds[i];
+        const res = await broadcastSendOne(uid, bcText, null, null);
+        if (res && res.ok) { stats.sent++; }
+        else               { stats.failed++; console.log(`📢 BC fail [${uid}]: ${res?.description || '?'}`); }
+        // تحديث رسالة الحالة دورياً
+        if ((i + 1) % UPDATE_EVERY === 0 || i === userIds.length - 1) {
+          await updateBroadcastStatusMsg(bot, chatId, msgId, stats, false).catch(() => {});
+        }
+        // تأخير بسيط لتجنب rate limit (35 رسالة/ثانية حد تيليجرام)
+        await new Promise(r => setTimeout(r, 35));
+      }
+
+      broadcastActive = false;
+      await updateBroadcastStatusMsg(bot, chatId, msgId, stats, true).catch(() => {});
+      console.log(`📢 Broadcast done: ✅${stats.sent} ❌${stats.failed} total=${stats.total}`);
+      return;
+    }
+
+    // ── إلغاء البث ──
+    if (data.startsWith('bc_cancel:')) {
+      await bot.answerCallbackQuery(query.id, { text: '❌ تم إلغاء البث' });
+      bot._broadcastPending = null;
+      await bot.editMessageText('❌ تم إلغاء عملية البث.', { chat_id: chatId, message_id: msgId }).catch(() => {});
+      return;
+    }
 
     if (data.startsWith('ban_user:')) {
       const uid = data.replace('ban_user:', '').trim();
