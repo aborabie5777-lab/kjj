@@ -1752,6 +1752,31 @@ function startWelcomeBot() {
   let broadcastState = null;
   // { total, sent, failed, current, startedAt, done, doneAt }
 
+  // ─── /broadcast_debug ─────────────────────────────────
+  bot.onText(/\/broadcast_debug/, async (msg) => {
+    if (!isAdmin(msg)) { await unauth(msg); return; }
+    await adminReply(bot, msg.chat.id, '🔍 جاري فحص قاعدة البيانات...');
+    try {
+      const dbUrl  = process.env.FIREBASE_DB_URL.replace(/\/$/, '');
+      const token  = await admin.app().options.credential.getAccessToken();
+      const res    = await fetch(`${dbUrl}/users.json?shallow=true&access_token=${token.access_token}`);
+      const data   = await res.json();
+      const count  = data ? Object.keys(data).length : 0;
+      const sample = data ? Object.keys(data).slice(0, 5).join(', ') : '—';
+      await adminReply(bot, msg.chat.id,
+        `🔍 <b>تشخيص قاعدة البيانات</b>\n\n` +
+        `📁 مسار: <code>/users</code>\n` +
+        `👥 عدد المستخدمين: <b>${count}</b>\n` +
+        `🔑 أمثلة على IDs:\n<code>${sample}</code>\n\n` +
+        (count === 0
+          ? `⚠️ <b>المسار فاضي!</b> تأكد إن المستخدمين متخزنين تحت <code>/users/{userId}</code>`
+          : `✅ البيانات موجودة — البث هيشتغل صح`)
+      );
+    } catch (e) {
+      await adminReply(bot, msg.chat.id, `❌ خطأ في الفحص: ${e.message}`);
+    }
+  });
+
   // ─── /broadcast_status ────────────────────────────────
   bot.onText(/\/broadcast_status/, async (msg) => {
     if (!isAdmin(msg)) { await unauth(msg); return; }
@@ -1993,9 +2018,21 @@ function startWelcomeBot() {
           '💡 استخدم /broadcast_status لمتابعة التقدم في أي وقت'
         );
         try {
-          const usersSnap = await db.ref('users').once('value');
-          const users     = usersSnap.val() || {};
-          const userIds   = Object.keys(users);
+          // جلب chat IDs فقط بدون تحميل كل بيانات المستخدمين
+          // نستخدم shallow=true عبر REST API لتجنب تحميل 139k مستخدم كاملاً
+          let userIds = [];
+          try {
+            const dbUrl    = process.env.FIREBASE_DB_URL.replace(/\/$/, '');
+            const token    = await admin.app().options.credential.getAccessToken();
+            const shallowRes = await fetch(`${dbUrl}/users.json?shallow=true&access_token=${token.access_token}`);
+            const shallowData = await shallowRes.json();
+            userIds = shallowData ? Object.keys(shallowData) : [];
+          } catch (shallowErr) {
+            console.log(`⚠️ shallow fetch failed, fallback: ${shallowErr.message}`);
+            const usersSnap = await db.ref('users').once('value');
+            const users     = usersSnap.val() || {};
+            userIds         = Object.keys(users);
+          }
           let sent = 0, failed = 0;
 
           // تهيئة حالة البث
