@@ -1894,6 +1894,69 @@ function startWelcomeBot() {
     );
   });
 
+  // ─── /sendmsg [userId] [نص الرسالة] ──────────────────
+  // إرسال رسالة لمستخدم واحد بالـ userId
+  // مثال: /sendmsg 123456789 مرحباً! حسابك تم تحديثه ✅
+  bot.onText(/\/sendmsg (.+)/, async (msg, match) => {
+    if (!isAdmin(msg)) { await unauth(msg); return; }
+    const parts  = match[1].trim().split(/\s+/);
+    const userId = parts[0];
+    const text   = parts.slice(1).join(' ').trim();
+
+    if (!userId || !text) {
+      await adminReply(bot, msg.chat.id,
+        `❌ <b>الاستخدام الصحيح:</b>\n` +
+        `/sendmsg [userId] [نص الرسالة]\n\n` +
+        `<b>مثال:</b>\n` +
+        `/sendmsg 123456789 مرحباً! حسابك تم تحديثه ✅`
+      );
+      return;
+    }
+
+    // التحقق من وجود المستخدم في Firebase
+    try {
+      const userSnap = await db.ref(`users/${userId}`).once('value');
+      if (!userSnap.exists()) {
+        await adminReply(bot, msg.chat.id, `⚠️ المستخدم <code>${userId}</code> غير موجود في قاعدة البيانات.\nسيتم المحاولة على أي حال...`);
+      }
+    } catch (e) { /* نكمل حتى لو فشل الفحص */ }
+
+    // إرسال الرسالة
+    try {
+      const token = process.env.TELEGRAM_BOT_TOKEN;
+      const res   = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id:    userId,
+          text:       text,
+          parse_mode: 'HTML',
+          disable_web_page_preview: true,
+        }),
+      });
+      const data = await res.json();
+
+      if (data.ok) {
+        await adminReply(bot, msg.chat.id,
+          `✅ <b>تم الإرسال بنجاح</b>\n\n` +
+          `👤 المستخدم: <code>${userId}</code>\n` +
+          `📝 الرسالة:\n<i>${text.substring(0, 300)}${text.length > 300 ? '...' : ''}</i>`
+        );
+        console.log(`📨 Admin sent message to user ${userId}`);
+      } else {
+        const errMsg = data.description || 'خطأ غير معروف';
+        await adminReply(bot, msg.chat.id,
+          `❌ <b>فشل الإرسال</b>\n\n` +
+          `👤 المستخدم: <code>${userId}</code>\n` +
+          `⚠️ السبب: <code>${errMsg}</code>\n\n` +
+          `${errMsg.includes('blocked') || errMsg.includes('bot was blocked') ? '🚫 المستخدم قام بحظر البوت' : ''}`
+        );
+      }
+    } catch (e) {
+      await adminReply(bot, msg.chat.id, `❌ خطأ تقني: ${e.message}`);
+    }
+  });
+
   // ─── Callbacks ────────────────────────────────────────
   bot.on('callback_query', async (query) => {
     if (query.message.chat.id.toString() !== ADMIN_CHAT_ID) return;
