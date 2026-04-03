@@ -1894,66 +1894,205 @@ function startWelcomeBot() {
     );
   });
 
-  // ─── /sendmsg [userId] [نص الرسالة] ──────────────────
-  // إرسال رسالة لمستخدم واحد بالـ userId
-  // مثال: /sendmsg 123456789 مرحباً! حسابك تم تحديثه ✅
-  bot.onText(/\/sendmsg (.+)/, async (msg, match) => {
-    if (!isAdmin(msg)) { await unauth(msg); return; }
-    const parts  = match[1].trim().split(/\s+/);
-    const userId = parts[0];
-    const text   = parts.slice(1).join(' ').trim();
+  // ══════════════════════════════════════════════════════
+  // 📨 نظام إرسال رسالة لمستخدم واحد — متعدد الخطوات
+  // ══════════════════════════════════════════════════════
+  // الخطوات:
+  //   1) /sendmsg [userId]          ← تحديد المستخدم
+  //   2) البوت يطلب النص
+  //   3) البوت يطلب صورة (اختياري — skip لتخطي)
+  //   4) البوت يطلب الأزرار (اختياري — skip لتخطي)
+  //      صيغة الأزرار: اسم الزر | https://رابط
+  //      يمكن إضافة أكثر من زر بفصلهم بسطر جديد
+  //   5) معاينة ثم إرسال
+  // ──────────────────────────────────────────────────────
 
-    if (!userId || !text) {
+  // تخزين حالة المحادثة لكل أدمن
+  if (!bot._sendmsgSessions) bot._sendmsgSessions = {};
+
+  // دالة مساعدة: تنفيذ الإرسال الفعلي للمستخدم
+  async function executeSendMsg(bot, adminChatId, session) {
+    const { userId, text, photoUrl, buttons } = session;
+    const token = process.env.TELEGRAM_BOT_TOKEN;
+
+    // بناء reply_markup لو في أزرار
+    let replyMarkup = null;
+    if (buttons && buttons.length > 0) {
+      replyMarkup = {
+        inline_keyboard: buttons.map(b => [{ text: b.label, url: b.url }])
+      };
+    }
+
+    try {
+      let res, payload;
+      if (photoUrl) {
+        payload = { chat_id: userId, photo: photoUrl, caption: text, parse_mode: 'HTML' };
+        if (replyMarkup) payload.reply_markup = replyMarkup;
+        res = await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+      } else {
+        payload = { chat_id: userId, text, parse_mode: 'HTML', disable_web_page_preview: false };
+        if (replyMarkup) payload.reply_markup = replyMarkup;
+        res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+      }
+      const data = await res.json();
+      return data;
+    } catch (e) { return { ok: false, description: e.message }; }
+  }
+
+  // ── الخطوة 1: /sendmsg [userId] ──
+  bot.onText(/\/sendmsg(?:\s+(\S+))?$/, async (msg, match) => {
+    if (!isAdmin(msg)) { await unauth(msg); return; }
+    const userId = match && match[1] ? match[1].trim() : null;
+
+    if (!userId) {
       await adminReply(bot, msg.chat.id,
-        `❌ <b>الاستخدام الصحيح:</b>\n` +
-        `/sendmsg [userId] [نص الرسالة]\n\n` +
+        `📨 <b>إرسال رسالة لمستخدم</b>\n\n` +
+        `<b>الاستخدام:</b>\n` +
+        `/sendmsg [userId]\n\n` +
         `<b>مثال:</b>\n` +
-        `/sendmsg 123456789 مرحباً! حسابك تم تحديثه ✅`
+        `/sendmsg 123456789`
       );
       return;
     }
 
-    // التحقق من وجود المستخدم في Firebase
+    // التحقق من وجود المستخدم
     try {
       const userSnap = await db.ref(`users/${userId}`).once('value');
       if (!userSnap.exists()) {
-        await adminReply(bot, msg.chat.id, `⚠️ المستخدم <code>${userId}</code> غير موجود في قاعدة البيانات.\nسيتم المحاولة على أي حال...`);
+        await adminReply(bot, msg.chat.id, `⚠️ المستخدم <code>${userId}</code> غير موجود في Firebase، لكن سنكمل.`);
       }
-    } catch (e) { /* نكمل حتى لو فشل الفحص */ }
+    } catch (e) {}
 
-    // إرسال الرسالة
-    try {
-      const token = process.env.TELEGRAM_BOT_TOKEN;
-      const res   = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id:    userId,
-          text:       text,
-          parse_mode: 'HTML',
-          disable_web_page_preview: true,
-        }),
-      });
-      const data = await res.json();
+    // إنشاء session
+    bot._sendmsgSessions[msg.chat.id] = { step: 'awaiting_text', userId };
 
-      if (data.ok) {
-        await adminReply(bot, msg.chat.id,
-          `✅ <b>تم الإرسال بنجاح</b>\n\n` +
-          `👤 المستخدم: <code>${userId}</code>\n` +
-          `📝 الرسالة:\n<i>${text.substring(0, 300)}${text.length > 300 ? '...' : ''}</i>`
-        );
-        console.log(`📨 Admin sent message to user ${userId}`);
+    await adminReply(bot, msg.chat.id,
+      `📨 <b>إرسال لـ</b> <code>${userId}</code>\n\n` +
+      `<b>الخطوة 1/3 — اكتب نص الرسالة:</b>\n` +
+      `(يدعم HTML: <code>&lt;b&gt;عريض&lt;/b&gt;</code>، <code>&lt;i&gt;مائل&lt;/i&gt;</code>، <code>&lt;code&gt;كود&lt;/code&gt;</code>)\n\n` +
+      `أرسل /cancel_sendmsg للإلغاء`
+    );
+  });
+
+  // ── إلغاء ──
+  bot.onText(/\/cancel_sendmsg/, async (msg) => {
+    if (!isAdmin(msg)) return;
+    if (bot._sendmsgSessions[msg.chat.id]) {
+      delete bot._sendmsgSessions[msg.chat.id];
+      await adminReply(bot, msg.chat.id, '❌ تم إلغاء إرسال الرسالة.');
+    }
+  });
+
+  // ── معالجة خطوات المحادثة ──
+  bot.on('message', async (msg) => {
+    if (msg.chat.id.toString() !== ADMIN_CHAT_ID) return;
+    const session = bot._sendmsgSessions && bot._sendmsgSessions[msg.chat.id];
+    if (!session) return;
+    // تجاهل الأوامر (تبدأ بـ /)
+    if (msg.text && msg.text.startsWith('/')) return;
+
+    const token = process.env.TELEGRAM_BOT_TOKEN;
+
+    // ── الخطوة 2: استقبال النص ──
+    if (session.step === 'awaiting_text') {
+      if (!msg.text || !msg.text.trim()) {
+        await adminReply(bot, msg.chat.id, '⚠️ أرسل نصاً للرسالة.');
+        return;
+      }
+      session.text = msg.text.trim();
+      session.step = 'awaiting_photo';
+      await adminReply(bot, msg.chat.id,
+        `✅ تم حفظ النص.\n\n` +
+        `<b>الخطوة 2/3 — أرسل رابط الصورة (اختياري):</b>\n` +
+        `<code>https://example.com/image.jpg</code>\n\n` +
+        `أو أرسل <b>skip</b> للتخطي بدون صورة`
+      );
+      return;
+    }
+
+    // ── الخطوة 3: استقبال الصورة ──
+    if (session.step === 'awaiting_photo') {
+      const txt = msg.text ? msg.text.trim() : '';
+      if (txt.toLowerCase() === 'skip' || txt === '') {
+        session.photoUrl = null;
+      } else if (txt.startsWith('http')) {
+        session.photoUrl = txt;
       } else {
-        const errMsg = data.description || 'خطأ غير معروف';
-        await adminReply(bot, msg.chat.id,
-          `❌ <b>فشل الإرسال</b>\n\n` +
-          `👤 المستخدم: <code>${userId}</code>\n` +
-          `⚠️ السبب: <code>${errMsg}</code>\n\n` +
-          `${errMsg.includes('blocked') || errMsg.includes('bot was blocked') ? '🚫 المستخدم قام بحظر البوت' : ''}`
-        );
+        await adminReply(bot, msg.chat.id, '⚠️ أرسل رابط صحيح يبدأ بـ https:// أو أرسل <b>skip</b>');
+        return;
       }
-    } catch (e) {
-      await adminReply(bot, msg.chat.id, `❌ خطأ تقني: ${e.message}`);
+      session.step = 'awaiting_buttons';
+      await adminReply(bot, msg.chat.id,
+        `✅ ${session.photoUrl ? 'تم حفظ الصورة.' : 'بدون صورة.'}\n\n` +
+        `<b>الخطوة 3/3 — أضف أزرار (اختياري):</b>\n\n` +
+        `صيغة كل زر في سطر منفصل:\n` +
+        `<code>اسم الزر | https://الرابط</code>\n\n` +
+        `مثال:\n` +
+        `<code>🐼 افتح التطبيق | https://t.me/PandaBamboBot\n` +
+        `🎁 احصل على مكافأة | https://t.me/PandaBamboBot?start=bonus</code>\n\n` +
+        `أو أرسل <b>skip</b> بدون أزرار`
+      );
+      return;
+    }
+
+    // ── الخطوة 4: استقبال الأزرار ──
+    if (session.step === 'awaiting_buttons') {
+      const txt = msg.text ? msg.text.trim() : '';
+      if (txt.toLowerCase() === 'skip' || txt === '') {
+        session.buttons = [];
+      } else {
+        const lines = txt.split('\n').map(l => l.trim()).filter(Boolean);
+        const parsed = [];
+        const invalid = [];
+        for (const line of lines) {
+          const parts = line.split('|').map(p => p.trim());
+          if (parts.length < 2 || !parts[1].startsWith('http')) {
+            invalid.push(line);
+          } else {
+            parsed.push({ label: parts[0], url: parts[1] });
+          }
+        }
+        if (invalid.length > 0) {
+          await adminReply(bot, msg.chat.id,
+            `⚠️ هذه الأزرار غير صحيحة (تأكد من وجود | والرابط):\n` +
+            invalid.map(l => `• <code>${l}</code>`).join('\n') +
+            `\n\nأعد الإرسال أو أرسل <b>skip</b>`
+          );
+          return;
+        }
+        session.buttons = parsed;
+      }
+
+      // ── معاينة الرسالة ──
+      session.step = 'confirming';
+      const btnPreview = session.buttons.length > 0
+        ? '\n\n🔘 <b>الأزرار:</b>\n' + session.buttons.map(b => `• ${b.label} → ${b.url}`).join('\n')
+        : '\n\nبدون أزرار';
+
+      await adminReply(bot, msg.chat.id,
+        `👁 <b>معاينة الرسالة</b>\n` +
+        `${'━'.repeat(30)}\n` +
+        `👤 إلى: <code>${session.userId}</code>\n` +
+        `${session.photoUrl ? `🖼 صورة: ${session.photoUrl.substring(0, 60)}...\n` : ''}` +
+        `📝 النص:\n${session.text.substring(0, 500)}${session.text.length > 500 ? '...' : ''}` +
+        btnPreview +
+        `\n${'━'.repeat(30)}`,
+        {
+          reply_markup: {
+            inline_keyboard: [[
+              { text: '✅ إرسال الآن', callback_data: `sm_confirm:${msg.chat.id}` },
+              { text: '❌ إلغاء',      callback_data: `sm_cancel:${msg.chat.id}`  },
+            ]]
+          }
+        }
+      );
+      return;
     }
   });
 
@@ -1971,6 +2110,41 @@ function startWelcomeBot() {
     const data   = query.data || '';
     const chatId = query.message.chat.id;
     const msgId  = query.message.message_id;
+
+    // ── تأكيد إرسال sendmsg ──
+    if (data.startsWith('sm_confirm:')) {
+      await bot.answerCallbackQuery(query.id, { text: '📨 جاري الإرسال...' });
+      const session = bot._sendmsgSessions && bot._sendmsgSessions[chatId];
+      if (!session || session.step !== 'confirming') {
+        await bot.editMessageText('❌ انتهت صلاحية الطلب.', { chat_id: chatId, message_id: msgId, reply_markup: { inline_keyboard: [] } }).catch(() => {});
+        return;
+      }
+      delete bot._sendmsgSessions[chatId];
+      const result = await executeSendMsg(bot, chatId, session);
+      if (result && result.ok) {
+        await bot.editMessageText(
+          query.message.text + `\n\n✅ <b>تم الإرسال بنجاح!</b>`,
+          { chat_id: chatId, message_id: msgId, parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } }
+        ).catch(() => {});
+        console.log(`📨 sendmsg OK → user ${session.userId}`);
+      } else {
+        const errMsg = result?.description || 'خطأ غير معروف';
+        const blockedNote = errMsg.includes('blocked') ? '\n🚫 المستخدم حظر البوت' : '';
+        await bot.editMessageText(
+          query.message.text + `\n\n❌ <b>فشل الإرسال:</b> <code>${errMsg}</code>${blockedNote}`,
+          { chat_id: chatId, message_id: msgId, parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } }
+        ).catch(() => {});
+      }
+      return;
+    }
+
+    // ── إلغاء sendmsg ──
+    if (data.startsWith('sm_cancel:')) {
+      await bot.answerCallbackQuery(query.id, { text: '❌ تم الإلغاء' });
+      if (bot._sendmsgSessions) delete bot._sendmsgSessions[chatId];
+      await bot.editMessageText('❌ تم إلغاء إرسال الرسالة.', { chat_id: chatId, message_id: msgId, reply_markup: { inline_keyboard: [] } }).catch(() => {});
+      return;
+    }
 
     // ── تأكيد البث ──
     if (data.startsWith('bc_confirm:')) {
