@@ -1024,7 +1024,8 @@ function startWelcomeBot() {
       `/addbamboo [userId] [كمية] — إضافة Bamboo لمستخدم\n\n` +
       `📨 <b>إرسال رسائل</b>\n` +
       `/sendmsg [userId] — إرسال رسالة لمستخدم واحد\n` +
-      `/broadcast — إرسال رسالة لجميع المستخدمين\n\n` +
+      `/broadcast — إرسال رسالة لجميع المستخدمين\n` +
+      `/broadcast_status — حالة البث الجاري (تقدم + ETA)\n\n` +
       `🕵️ <b>كشف التلاعب</b>\n` +
       `/check_suspicious — كشف محافظ مشتركة (+3 مستخدمين)\n` +
       `/reject_suspicious — رفض وحظر جميع المشبوهين\n` +
@@ -1747,6 +1748,68 @@ function startWelcomeBot() {
   // حالات المحادثة
   const msgSessions = {}; // { chatId: { step, targetUserId, text, photo, buttons, isBroadcast } }
 
+  // حالة البث الجاري
+  let broadcastState = null;
+  // { total, sent, failed, current, startedAt, done, doneAt }
+
+  // ─── /broadcast_status ────────────────────────────────
+  bot.onText(/\/broadcast_status/, async (msg) => {
+    if (!isAdmin(msg)) { await unauth(msg); return; }
+    if (!broadcastState) {
+      await adminReply(bot, msg.chat.id, '📭 لا يوجد بث جاري حالياً');
+      return;
+    }
+    const s        = broadcastState;
+    const elapsed  = Math.floor((Date.now() - s.startedAt) / 1000);
+    const done     = s.current;
+    const remaining = s.total - done;
+    const pct      = s.total > 0 ? ((done / s.total) * 100).toFixed(1) : 0;
+    const bar      = buildProgressBar(done, s.total, 20);
+
+    if (s.done) {
+      const duration = Math.floor((s.doneAt - s.startedAt) / 1000);
+      await adminReply(bot, msg.chat.id,
+        `✅ <b>البث اكتمل</b>\n\n` +
+        `${bar} ${pct}%\n\n` +
+        `👥 الإجمالي: <b>${s.total}</b>\n` +
+        `✅ وصل: <b>${s.sent}</b>\n` +
+        `❌ فشل: <b>${s.failed}</b>\n` +
+        `⏱ المدة: <b>${duration}s</b>`
+      );
+    } else {
+      const speed    = elapsed > 0 ? (done / elapsed).toFixed(1) : '—';
+      const etaSec   = speed > 0 ? Math.floor(remaining / speed) : null;
+      const etaStr   = etaSec !== null ? formatEta(etaSec) : '—';
+      await adminReply(bot, msg.chat.id,
+        `📡 <b>بث جارٍ الآن</b>\n\n` +
+        `${bar} ${pct}%\n\n` +
+        `👥 الإجمالي: <b>${s.total}</b>\n` +
+        `📤 وصل لحد: <b>${done}</b>\n` +
+        `✅ نجح: <b>${s.sent}</b>\n` +
+        `❌ فشل: <b>${s.failed}</b>\n` +
+        `⏳ باقي: <b>${remaining}</b>\n` +
+        `⚡ السرعة: <b>${speed}/ث</b>\n` +
+        `🕐 وقت متبقي: <b>${etaStr}</b>\n` +
+        `⏱ مضى: <b>${formatEta(elapsed)}</b>`
+      );
+    }
+  });
+
+  function buildProgressBar(current, total, width) {
+    if (total === 0) return '[' + '░'.repeat(width) + ']';
+    const filled = Math.round((current / total) * width);
+    return '[' + '█'.repeat(filled) + '░'.repeat(width - filled) + ']';
+  }
+
+  function formatEta(seconds) {
+    if (seconds < 60) return `${seconds}ث`;
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    if (m < 60) return `${m}د ${s}ث`;
+    const h = Math.floor(m / 60);
+    return `${h}س ${m % 60}د`;
+  }
+
   async function startMsgSession(bot, chatId, targetUserId, isBroadcast = false) {
     msgSessions[chatId] = { step: 'text', targetUserId, text: null, photo: null, buttons: [], isBroadcast };
     const header = isBroadcast
@@ -1925,29 +1988,54 @@ function startWelcomeBot() {
         );
       } else {
         // ── بث لجميع المستخدمين ──────────────────────
-        await adminReply(bot, chatId, '📢 <b>جاري إرسال الرسالة لجميع المستخدمين...</b>');
+        await adminReply(bot, chatId,
+          '📢 <b>جاري إرسال الرسالة لجميع المستخدمين...</b>\n' +
+          '💡 استخدم /broadcast_status لمتابعة التقدم في أي وقت'
+        );
         try {
           const usersSnap = await db.ref('users').once('value');
           const users     = usersSnap.val() || {};
           const userIds   = Object.keys(users);
           let sent = 0, failed = 0;
+
+          // تهيئة حالة البث
+          broadcastState = { total: userIds.length, sent: 0, failed: 0, current: 0, startedAt: Date.now(), done: false, doneAt: null };
+
           for (let i = 0; i < userIds.length; i++) {
             const ok = await sendToUser(userIds[i]);
             if (ok) sent++; else failed++;
-            // تحديث كل 50 مستخدم
-            if ((i + 1) % 50 === 0) {
-              await adminReply(bot, chatId, `📊 تقدم: ${i + 1}/${userIds.length} — ✅ ${sent} | ❌ ${failed}`);
+            broadcastState.current = i + 1;
+            broadcastState.sent    = sent;
+            broadcastState.failed  = failed;
+            // تحديث رسالة تلقائية كل 100 مستخدم
+            if ((i + 1) % 100 === 0) {
+              const pct = ((( i + 1) / userIds.length) * 100).toFixed(1);
+              const bar = buildProgressBar(i + 1, userIds.length, 15);
+              await adminReply(bot, chatId,
+                `📊 ${bar} ${pct}%\n` +
+                `📤 <b>${i + 1}</b>/${userIds.length} — ✅ ${sent} | ❌ ${failed}`
+              );
             }
             // تأخير بسيط لتجنب flood
             await new Promise(r => setTimeout(r, 50));
           }
+
+          broadcastState.done   = true;
+          broadcastState.doneAt = Date.now();
+          const duration = Math.floor((broadcastState.doneAt - broadcastState.startedAt) / 1000);
+
           await adminReply(bot, chatId,
             `🎉 <b>انتهى البث</b>\n\n` +
-            `👥 إجمالي المستخدمين: <b>${userIds.length}</b>\n` +
-            `✅ تم الإرسال: <b>${sent}</b>\n` +
-            `❌ فشل: <b>${failed}</b>`
+            `${buildProgressBar(userIds.length, userIds.length, 15)} 100%\n\n` +
+            `👥 الإجمالي: <b>${userIds.length}</b>\n` +
+            `✅ وصل: <b>${sent}</b>\n` +
+            `❌ فشل: <b>${failed}</b>\n` +
+            `⏱ المدة: <b>${formatEta(duration)}</b>`
           );
-        } catch (e) { await adminReply(bot, chatId, `❌ خطأ في البث: ${e.message}`); }
+        } catch (e) {
+          if (broadcastState) { broadcastState.done = true; broadcastState.doneAt = Date.now(); }
+          await adminReply(bot, chatId, `❌ خطأ في البث: ${e.message}`);
+        }
       }
       return;
     }
