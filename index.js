@@ -12,14 +12,14 @@ setInterval(() => {
   console.log('💓 BOT ALIVE - ' + new Date().toISOString());
   const fs = require('fs');
   try { fs.writeFileSync('/tmp/bot-alive.txt', Date.now().toString()); } catch(e) {}
-}, 5 * 60 * 1000); // ✅ تم تغييره من 20 ثانية إلى 5 دقايق — توفير CPU
+}, 5 * 60 * 1000);
 
 // ==========================
 // 🔹 Logging
 // ==========================
 let logCounter = 0;
 function smartLog(...args) { if (++logCounter <= 50) console.log(...args); }
-setInterval(() => { logCounter = 0; }, 5 * 60 * 1000); // ✅ تقليل تكرار الـ log reset
+setInterval(() => { logCounter = 0; }, 5 * 60 * 1000);
 
 // ==========================
 // 🔹 إعدادات الأدمن
@@ -34,7 +34,7 @@ const RETRY_DELAY         = 10000;
 
 let PROCESSING_MODE       = 'batch';
 let BATCH_SIZE            = 10;
-const BATCH_FLUSH_SECONDS = 120; // ✅ تم تغييره من 30 إلى 120 ثانية — توفير Firebase queries
+const BATCH_FLUSH_SECONDS = 120;
 const BATCH_BETWEEN_DELAY = 3000;
 let SINGLE_DELAY_MS       = 3000;
 
@@ -49,7 +49,7 @@ let systemPaused          = false;
 // ==========================
 // 🔹 تحكم في نظام السحب
 // ==========================
-let WITHDRAWAL_ENABLED = false; // ⛔ نظام السحب موقوف — غيّره إلى true لتشغيله
+let WITHDRAWAL_ENABLED = false;
 
 // ==========================
 // 🔹 دالة تقريب المبلغ
@@ -213,7 +213,7 @@ async function adminReply(bot, chatId, text, extra = {}) {
 }
 
 // ==========================
-// 🔹 التحقق من تأكيد المعاملة (للـ Batch)
+// 🔹 التحقق من تأكيد المعاملة (لـ Batch)
 // ==========================
 async function confirmBatchTransaction(expectedSeqno, maxWaitMs = 120000) {
   const start = Date.now();
@@ -391,11 +391,7 @@ async function validateWithdrawal(withdrawId, data) {
     return { valid: false, skip: false };
   }
 
-  // ملاحظة: تم إلغاء قيد الرفض لأقل من 0.1 TON — السحوبات الصغيرة تُعالج عبر فحص الإيداعات
-
-  // ==========================
-  // 🔹 فحص الإيداعات الموحد — يغطي كل الحالات
-  // ==========================
+  // فحص الإيداعات الموحد — يغطي كل الحالات
   if (userId && !data.approvedByAdmin) {
     try {
       const [depositsSnap, paidWdSnap] = await Promise.all([
@@ -403,12 +399,10 @@ async function validateWithdrawal(withdrawId, data) {
         db.ref("withdrawQueue").orderByChild("userId").equalTo(userId).once("value"),
       ]);
 
-      // إجمالي الإيداعات الحقيقية (تجاهل pending)
       const depositsData    = depositsSnap.val() || {};
       const confirmedDeps   = Object.values(depositsData).filter(d => !d.status || d.status !== 'pending');
       const totalDepositTon = confirmedDeps.reduce((s, d) => s + (Number(d.amount) || 0), 0);
 
-      // إجمالي السحوبات المدفوعة سابقاً
       const paidWdData   = paidWdSnap.val() || {};
       const totalPaidTon = Object.values(paidWdData)
         .filter(d => d.status === 'paid')
@@ -419,10 +413,8 @@ async function validateWithdrawal(withdrawId, data) {
       console.log(`🔍 Deposit check [${userId}]: deposited=${totalDepositTon.toFixed(3)} paidSoFar=${totalPaidTon.toFixed(3)} thisWd=${roundedAmount} projected=${projectedTotal.toFixed(3)}`);
 
       if (projectedTotal > totalDepositTon) {
-        // المستخدم المجاني (لم يودع) — السماح بسحب حتى 0.1 TON تلقائياً
         if (totalDepositTon === 0 && roundedAmount <= 0.1) {
           console.log(`✅ Free user withdrawal allowed (≤0.1 TON): user ${userId} | ${roundedAmount} TON`);
-          // نكمل المعالجة بشكل طبيعي
         } else {
         await db.ref(`withdrawQueue/${withdrawId}`).update({
           status:    "awaiting_approval",
@@ -468,7 +460,7 @@ async function validateWithdrawal(withdrawId, data) {
           else console.log(`❌ Deposit alert failed: ${JSON.stringify(resData)}`);
         }
         return { valid: false, skip: false };
-        } // end else (not free user ≤0.1 TON)
+        }
       }
       console.log(`✅ Deposit check passed for ${userId}`);
     } catch (e) { console.log(`⚠️ Deposit check error: ${e.message}`); }
@@ -813,7 +805,7 @@ async function unlockExpiredDailyLimits() {
 }
 
 // ==========================
-// 🔹 فحص الإيداعات (كل دقيقة)
+// 🔹 فحص الإيداعات (كل 5 دقايق) - تعديل: إضافة TON Balance بدلاً من Bamboo
 // ==========================
 async function checkDeposits() {
   const wallet   = process.env.TON_WALLET_ADDRESS;
@@ -856,16 +848,13 @@ async function checkDeposits() {
       } catch(e) {}
       if (!userData) continue;
 
-      // حساب البامبو (1 TON = 50,000 Bamboo)
-      const bambooEarned     = Math.floor(amountTon * 50000);
-      const bonusBamboo      = Math.floor(bambooEarned * 0.5); // 🎁 عرض 50% إضافي
-      const totalBamboo      = bambooEarned + bonusBamboo;
-      const currentBamboo    = userData.bamboo || 0;
-      const newBambooBalance = currentBamboo + totalBamboo;
+      // 🔁 تعديل: إضافة رصيد TON مباشرة بدلاً من Bamboo (بدون 50% Bonus)
+      const currentTonBalance = Number(userData.tonBalance || 0);
+      const newTonBalance = currentTonBalance + amountTon;
 
-      // تحديث رصيد البامبو + تعليم المستخدم كمودع
+      // تحديث رصيد TON + تعليم المستخدم كمودع
       await db.ref(`users/${userId}`).update({
-        bamboo:       newBambooBalance,
+        tonBalance:   newTonBalance,
         hasDeposited: true,
       });
 
@@ -874,9 +863,7 @@ async function checkDeposits() {
       const depositTimestamp = Date.now();
       await db.ref(`users/${userId}/deposits`).push({
         amount:      amountTon,
-        bambooAdded: totalBamboo,
-        bambooBase:  bambooEarned,
-        bambooBonus: bonusBamboo,
+        tonAdded:    amountTon,
         txHash,
         txLink,
         date:        new Date(depositTimestamp).toISOString(),
@@ -886,24 +873,19 @@ async function checkDeposits() {
       // تعليم المعاملة كمُعالجة
       await db.ref(`processed/${txHash}`).set(true);
 
-      console.log(`💰 Deposit: +${bambooEarned} Bamboo + ${bonusBamboo} Bonus = ${totalBamboo} total → user ${userId} (${amountTon} TON)`);
+      console.log(`💰 Deposit: +${amountTon} TON → user ${userId} (${currentTonBalance} → ${newTonBalance} TON)`);
 
-      // إشعار المستخدم
+      // 🔁 تعديل: إشعار المستخدم برصيد TON (بدون Bamboo وبدون 50% Bonus)
       const formattedTon    = amountTon.toFixed(6);
-      const formattedBamboo = bambooEarned.toLocaleString();
-      const formattedBonus  = bonusBamboo.toLocaleString();
-      const formattedTotal  = totalBamboo.toLocaleString();
+      const formattedNewBalance = newTonBalance.toFixed(6);
       const userMessage =
-        `🎋 <b>Bamboo Power Activated!</b>\n\nDeposit Received Successfully ✅\n\n` +
+        `💰 <b>TON Deposit Received!</b>\n\nDeposit Successful ✅\n\n` +
         `━━━━━━━━━━━━━━━━\n` +
-        `💰 <b>Amount:</b> ${formattedTon} TON\n` +
-        `🎍 <b>Bamboo Added:</b> ${formattedBamboo}\n` +
-        `🎁 <b>Offer Bonus (+50%):</b> ${formattedBonus}\n` +
-        `✨ <b>Total Bamboo:</b> ${formattedTotal}\n` +
+        `💎 <b>Amount:</b> ${formattedTon} TON\n` +
+        `📊 <b>New TON Balance:</b> ${formattedNewBalance} TON\n` +
         `━━━━━━━━━━━━━━━━\n\n` +
-        `Your bamboo factory has received new energy from the forest treasury. The panda warriors are ready to expand production!\n\n` +
-        `The stronger the bamboo empire grows, the greater your rewards will become.\n\n` +
-        `🐼 Welcome back to the forest, warrior.\n\n` +
+        `Your TON has been added to your balance. You can now use it within the app.\n\n` +
+        `Thank you for your support! 🐼\n\n` +
         `🔗 <a href="${txLink}">View Transaction</a>`;
 
       await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
@@ -921,16 +903,13 @@ async function checkDeposits() {
       });
       console.log(`📨 Deposit notification sent to user ${userId}`);
 
-      // إشعار الأدمن بالإيداع
+      // 🔁 تعديل: إشعار الأدمن بالإيداع (بدون Bamboo)
       const adminMessage =
         `💰 <b>إيداع جديد تم معالجته ✅</b>\n\n` +
         `━━━━━━━━━━━━━━━━\n` +
         `👤 User ID: <code>${userId}</code>\n` +
         `💎 المبلغ: <b>${formattedTon} TON</b>\n` +
-        `🎍 Bamboo الأساسي: <b>${formattedBamboo}</b>\n` +
-        `🎁 Bamboo الإضافي (50%): <b>${formattedBonus}</b>\n` +
-        `✨ إجمالي Bamboo المضاف: <b>${formattedTotal}</b>\n` +
-        `🏦 رصيد Bamboo الجديد: <b>${newBambooBalance.toLocaleString()}</b>\n` +
+        `🏦 رصيد TON الجديد: <b>${formattedNewBalance} TON</b>\n` +
         `━━━━━━━━━━━━━━━━\n` +
         `✅ تم تحديث الرصيد\n` +
         `✅ تم إرسال إشعار للمستخدم\n` +
@@ -1021,7 +1000,8 @@ function startWelcomeBot() {
       `/unwallet [address] — رفع حظر محفظة\n` +
       `/userinfo [userId] — معلومات مستخدم كاملة\n` +
       `/addcoins [userId] [كمية] — إضافة Coins لمستخدم\n` +
-      `/addbamboo [userId] [كمية] — إضافة Bamboo لمستخدم\n\n` +
+      `/addbamboo [userId] [كمية] — إضافة Bamboo لمستخدم\n` +
+      `/addton [userId] [كمية] — إضافة TON لمستخدم\n\n` +
       `📨 <b>إرسال رسائل</b>\n` +
       `/sendmsg [userId] — إرسال رسالة لمستخدم واحد\n` +
       `/broadcast — إرسال رسالة لجميع المستخدمين\n` +
@@ -1283,19 +1263,17 @@ function startWelcomeBot() {
       const totalPaid = paid.reduce((s, d) => s + roundAmount(d.ton), 0);
       const wallets   = [...new Set(allWds.map(d => d.address).filter(Boolean))];
 
-      // ── إحصائيات الإيداعات ──
+      // إحصائيات الإيداعات
       const depositsData = depositsSnap.val() || {};
       const depositsList = Object.entries(depositsData);
-      // فقط الإيداعات المؤكدة (تجاهل pending)
       const confirmedDeposits = depositsList.filter(([, d]) => !d.status || d.status !== 'pending');
       const totalDepositTon   = confirmedDeposits.reduce((s, [, d]) => s + (Number(d.amount) || 0), 0);
       const totalDepositCount = confirmedDeposits.length;
 
-      // ── إحصائيات الإحالات ──
+      // إحصائيات الإحالات
       const referralsData    = referralsSnap.val() || {};
       const totalReferrals   = Object.keys(referralsData).length;
 
-      // عدد الإحالات النشطة: فحص كل مُحال مباشرة من hasDeposited
       let activeReferrals = 0;
       const referralIds = Object.keys(referralsData);
       for (const referralId of referralIds) {
@@ -1305,18 +1283,19 @@ function startWelcomeBot() {
         } catch (e) { /* تجاهل الأخطاء الفردية */ }
       }
 
-      // ── رصيد الكوينز والبامبو ──
+      // رصيد الكوينز والبامبو والتون
       const userData   = userSnap.val() || {};
       const bambooBalance = userData.bamboo || 0;
       const coinsBalance  = userData.coins  || 0;
+      const tonBalance    = userData.tonBalance || 0;
 
-      // ── إجمالي السحوبات لمقارنة مع الإيداعات ──
+      // إجمالي السحوبات لمقارنة مع الإيداعات
       const totalWithdrawTon = paid.reduce((s, d) => s + roundAmount(d.ton), 0);
 
-      // ── روابط الإيداعات ──
+      // روابط الإيداعات
       let depositsText = '';
       if (confirmedDeposits.length > 0) {
-        const lastDeposits = confirmedDeposits.slice(-5); // آخر 5 إيداعات
+        const lastDeposits = confirmedDeposits.slice(-5);
         depositsText = `\n🔗 <b>آخر الإيداعات (روابط المعاملات):</b>\n`;
         lastDeposits.forEach(([, d], idx) => {
           const amt  = Number(d.amount || 0).toFixed(3);
@@ -1335,7 +1314,7 @@ function startWelcomeBot() {
         depositsText = `\n⚠️ لا توجد إيداعات مؤكدة\n`;
       }
 
-      // ── تحذير إذا السحوبات > الإيداعات ──
+      // تحذير إذا السحوبات > الإيداعات
       const suspiciousWithdraw = totalDepositTon > 0 && totalWithdrawTon > totalDepositTon;
       const noDepositWarning   = totalDepositTon === 0 && totalPaid > 0;
 
@@ -1348,6 +1327,7 @@ function startWelcomeBot() {
         `💰 <b>الرصيد الحالي</b>\n` +
         `🎍 Bamboo: <b>${Number(bambooBalance).toLocaleString()}</b>\n` +
         `🪙 Coins: <b>${Number(coinsBalance).toLocaleString()}</b>\n` +
+        `💎 TON: <b>${Number(tonBalance).toFixed(6)} TON</b>\n` +
         `${'━'.repeat(30)}\n\n` +
 
         `📥 <b>الإيداعات</b>\n` +
@@ -1438,6 +1418,34 @@ function startWelcomeBot() {
     } catch(e) { await adminReply(bot, msg.chat.id, `❌ ${e.message}`); }
   });
 
+  // ─── /addton [userId] [amount] ───────────────────────
+  bot.onText(/\/addton (.+)/, async (msg, match) => {
+    if (!isAdmin(msg)) { await unauth(msg); return; }
+    const parts  = match[1].trim().split(/\s+/);
+    const userId = parts[0];
+    const amount = parseFloat(parts[1]);
+    if (!userId || isNaN(amount) || amount <= 0) {
+      await adminReply(bot, msg.chat.id, `❌ الاستخدام: /addton [userId] [المبلغ]\nمثال: /addton 123456789 10.5`);
+      return;
+    }
+    try {
+      const userSnap    = await db.ref(`users/${userId}`).once("value");
+      if (!userSnap.exists()) { await adminReply(bot, msg.chat.id, `❌ المستخدم <code>${userId}</code> غير موجود`); return; }
+      const userData    = userSnap.val() || {};
+      const currentTon = Number(userData.tonBalance || 0);
+      const newTon     = currentTon + amount;
+      await db.ref(`users/${userId}`).update({ tonBalance: newTon, updatedAt: Date.now() });
+      await adminReply(bot, msg.chat.id,
+        `✅ <b>تمت إضافة TON بنجاح</b>\n\n` +
+        `👤 User: <code>${userId}</code>\n` +
+        `➕ مضاف: <b>${amount.toFixed(6)} TON</b>\n` +
+        `📊 الرصيد القديم: <b>${currentTon.toFixed(6)} TON</b>\n` +
+        `💰 الرصيد الجديد: <b>${newTon.toFixed(6)} TON</b>`
+      );
+      console.log(`✅ Admin added ${amount} TON → user ${userId} (${currentTon} → ${newTon})`);
+    } catch(e) { await adminReply(bot, msg.chat.id, `❌ ${e.message}`); }
+  });
+
   // ─── /check_nodeposit ─────────────────────────────────
   bot.onText(/\/check_nodeposit/, async (msg) => {
     if (!isAdmin(msg)) { await unauth(msg); return; }
@@ -1447,7 +1455,6 @@ function startWelcomeBot() {
       const items = snap.val();
       if (!items) { await adminReply(bot, msg.chat.id, "📭 لا توجد سحوبات مدفوعة"); return; }
 
-      // جمع كل المستخدمين الفريدين مع إجمالي سحوباتهم
       const userMap = {};
       Object.values(items).forEach(d => {
         if (!d.userId) return;
@@ -1456,7 +1463,6 @@ function startWelcomeBot() {
         userMap[d.userId].count++;
       });
 
-      // فحص كل مستخدم — هل عنده إيداع؟
       await adminReply(bot, msg.chat.id, `👥 ${Object.keys(userMap).length} مستخدم فريد — جاري فحص الإيداعات...`);
 
       const noDepositUsers = [];
@@ -1495,6 +1501,7 @@ function startWelcomeBot() {
       }
     } catch(e) { await adminReply(bot, msg.chat.id, `❌ ${e.message}`); }
   });
+
   bot.onText(/\/lastpaid/, async (msg) => {
     if (!isAdmin(msg)) { await unauth(msg); return; }
     try {
@@ -1526,6 +1533,7 @@ function startWelcomeBot() {
       await adminReply(bot, msg.chat.id, text, { disable_web_page_preview: true });
     } catch(e) { await adminReply(bot, msg.chat.id, `❌ ${e.message}`); }
   });
+
   bot.onText(/\/pause/, async (msg) => {
     if (!isAdmin(msg)) { await unauth(msg); return; }
     systemPaused = true;
@@ -1742,83 +1750,13 @@ function startWelcomeBot() {
     } catch (e) { await adminReply(bot, msg.chat.id, `❌ ${e.message}`); }
   });
 
-  // ─── /sendmsg [userId] — إرسال رسالة لمستخدم واحد ────
-  // ─── /broadcast       — إرسال رسالة لجميع المستخدمين ─
-
+  // ─── /sendmsg [userId] ────────────────────────────────
+  // ─── /broadcast ───────────────────────────────────────
   // حالات المحادثة
-  const msgSessions = {}; // { chatId: { step, targetUserId, text, photo, buttons, isBroadcast } }
+  const msgSessions = {};
 
   // حالة البث الجاري
   let broadcastState = null;
-  // { total, sent, failed, current, startedAt, done, doneAt }
-
-  // ─── /broadcast_debug ─────────────────────────────────
-  bot.onText(/\/broadcast_debug/, async (msg) => {
-    if (!isAdmin(msg)) { await unauth(msg); return; }
-    await adminReply(bot, msg.chat.id, '🔍 جاري فحص قاعدة البيانات...');
-    try {
-      const dbUrl  = process.env.FIREBASE_DB_URL.replace(/\/$/, '');
-      const token  = await admin.app().options.credential.getAccessToken();
-      const res    = await fetch(`${dbUrl}/users.json?shallow=true&access_token=${token.access_token}`);
-      const data   = await res.json();
-      const count  = data ? Object.keys(data).length : 0;
-      const sample = data ? Object.keys(data).slice(0, 5).join(', ') : '—';
-      await adminReply(bot, msg.chat.id,
-        `🔍 <b>تشخيص قاعدة البيانات</b>\n\n` +
-        `📁 مسار: <code>/users</code>\n` +
-        `👥 عدد المستخدمين: <b>${count}</b>\n` +
-        `🔑 أمثلة على IDs:\n<code>${sample}</code>\n\n` +
-        (count === 0
-          ? `⚠️ <b>المسار فاضي!</b> تأكد إن المستخدمين متخزنين تحت <code>/users/{userId}</code>`
-          : `✅ البيانات موجودة — البث هيشتغل صح`)
-      );
-    } catch (e) {
-      await adminReply(bot, msg.chat.id, `❌ خطأ في الفحص: ${e.message}`);
-    }
-  });
-
-  // ─── /broadcast_status ────────────────────────────────
-  bot.onText(/\/broadcast_status/, async (msg) => {
-    if (!isAdmin(msg)) { await unauth(msg); return; }
-    if (!broadcastState) {
-      await adminReply(bot, msg.chat.id, '📭 لا يوجد بث جاري حالياً');
-      return;
-    }
-    const s        = broadcastState;
-    const elapsed  = Math.floor((Date.now() - s.startedAt) / 1000);
-    const done     = s.current;
-    const remaining = s.total - done;
-    const pct      = s.total > 0 ? ((done / s.total) * 100).toFixed(1) : 0;
-    const bar      = buildProgressBar(done, s.total, 20);
-
-    if (s.done) {
-      const duration = Math.floor((s.doneAt - s.startedAt) / 1000);
-      await adminReply(bot, msg.chat.id,
-        `✅ <b>البث اكتمل</b>\n\n` +
-        `${bar} ${pct}%\n\n` +
-        `👥 الإجمالي: <b>${s.total}</b>\n` +
-        `✅ وصل: <b>${s.sent}</b>\n` +
-        `❌ فشل: <b>${s.failed}</b>\n` +
-        `⏱ المدة: <b>${duration}s</b>`
-      );
-    } else {
-      const speed    = elapsed > 0 ? (done / elapsed).toFixed(1) : '—';
-      const etaSec   = speed > 0 ? Math.floor(remaining / speed) : null;
-      const etaStr   = etaSec !== null ? formatEta(etaSec) : '—';
-      await adminReply(bot, msg.chat.id,
-        `📡 <b>بث جارٍ الآن</b>\n\n` +
-        `${bar} ${pct}%\n\n` +
-        `👥 الإجمالي: <b>${s.total}</b>\n` +
-        `📤 وصل لحد: <b>${done}</b>\n` +
-        `✅ نجح: <b>${s.sent}</b>\n` +
-        `❌ فشل: <b>${s.failed}</b>\n` +
-        `⏳ باقي: <b>${remaining}</b>\n` +
-        `⚡ السرعة: <b>${speed}/ث</b>\n` +
-        `🕐 وقت متبقي: <b>${etaStr}</b>\n` +
-        `⏱ مضى: <b>${formatEta(elapsed)}</b>`
-      );
-    }
-  });
 
   function buildProgressBar(current, total, width) {
     if (total === 0) return '[' + '░'.repeat(width) + ']';
@@ -1871,6 +1809,72 @@ function startWelcomeBot() {
     }
   });
 
+  bot.onText(/\/broadcast_status/, async (msg) => {
+    if (!isAdmin(msg)) { await unauth(msg); return; }
+    if (!broadcastState) {
+      await adminReply(bot, msg.chat.id, '📭 لا يوجد بث جاري حالياً');
+      return;
+    }
+    const s        = broadcastState;
+    const elapsed  = Math.floor((Date.now() - s.startedAt) / 1000);
+    const done     = s.current;
+    const remaining = s.total - done;
+    const pct      = s.total > 0 ? ((done / s.total) * 100).toFixed(1) : 0;
+    const bar      = buildProgressBar(done, s.total, 20);
+
+    if (s.done) {
+      const duration = Math.floor((s.doneAt - s.startedAt) / 1000);
+      await adminReply(bot, msg.chat.id,
+        `✅ <b>البث اكتمل</b>\n\n` +
+        `${bar} ${pct}%\n\n` +
+        `👥 الإجمالي: <b>${s.total}</b>\n` +
+        `✅ وصل: <b>${s.sent}</b>\n` +
+        `❌ فشل: <b>${s.failed}</b>\n` +
+        `⏱ المدة: <b>${duration}s</b>`
+      );
+    } else {
+      const speed    = elapsed > 0 ? (done / elapsed).toFixed(1) : '—';
+      const etaSec   = speed > 0 ? Math.floor(remaining / speed) : null;
+      const etaStr   = etaSec !== null ? formatEta(etaSec) : '—';
+      await adminReply(bot, msg.chat.id,
+        `📡 <b>بث جارٍ الآن</b>\n\n` +
+        `${bar} ${pct}%\n\n` +
+        `👥 الإجمالي: <b>${s.total}</b>\n` +
+        `📤 وصل لحد: <b>${done}</b>\n` +
+        `✅ نجح: <b>${s.sent}</b>\n` +
+        `❌ فشل: <b>${s.failed}</b>\n` +
+        `⏳ باقي: <b>${remaining}</b>\n` +
+        `⚡ السرعة: <b>${speed}/ث</b>\n` +
+        `🕐 وقت متبقي: <b>${etaStr}</b>\n` +
+        `⏱ مضى: <b>${formatEta(elapsed)}</b>`
+      );
+    }
+  });
+
+  bot.onText(/\/broadcast_debug/, async (msg) => {
+    if (!isAdmin(msg)) { await unauth(msg); return; }
+    await adminReply(bot, msg.chat.id, '🔍 جاري فحص قاعدة البيانات...');
+    try {
+      const dbUrl  = process.env.FIREBASE_DB_URL.replace(/\/$/, '');
+      const token  = await admin.app().options.credential.getAccessToken();
+      const res    = await fetch(`${dbUrl}/users.json?shallow=true&access_token=${token.access_token}`);
+      const data   = await res.json();
+      const count  = data ? Object.keys(data).length : 0;
+      const sample = data ? Object.keys(data).slice(0, 5).join(', ') : '—';
+      await adminReply(bot, msg.chat.id,
+        `🔍 <b>تشخيص قاعدة البيانات</b>\n\n` +
+        `📁 مسار: <code>/users</code>\n` +
+        `👥 عدد المستخدمين: <b>${count}</b>\n` +
+        `🔑 أمثلة على IDs:\n<code>${sample}</code>\n\n` +
+        (count === 0
+          ? `⚠️ <b>المسار فاضي!</b> تأكد إن المستخدمين متخزنين تحت <code>/users/{userId}</code>`
+          : `✅ البيانات موجودة — البث هيشتغل صح`)
+      );
+    } catch (e) {
+      await adminReply(bot, msg.chat.id, `❌ خطأ في الفحص: ${e.message}`);
+    }
+  });
+
   // معالج الرسائل لخطوات sendmsg / broadcast
   bot.on('message', async (msg) => {
     const chatId  = msg.chat.id.toString();
@@ -1879,9 +1883,8 @@ function startWelcomeBot() {
     if (!session) return;
     const text = msg.text || '';
 
-    // ── الخطوة 1: نص الرسالة ──────────────────────────
     if (session.step === 'text') {
-      if (!text || text.startsWith('/')) return; // تجاهل الأوامر
+      if (!text || text.startsWith('/')) return;
       session.text = text;
       session.step = 'photo';
       await adminReply(bot, msg.chat.id,
@@ -1891,7 +1894,6 @@ function startWelcomeBot() {
       return;
     }
 
-    // ── الخطوة 2: الصورة ──────────────────────────────
     if (session.step === 'photo') {
       if (text.toLowerCase() === 'skip') {
         session.photo = null;
@@ -1909,7 +1911,6 @@ function startWelcomeBot() {
       return;
     }
 
-    // ── الخطوة 3: الأزرار ─────────────────────────────
     if (session.step === 'buttons') {
       if (text.toLowerCase() !== 'skip') {
         const lines   = text.split('\n').map(l => l.trim()).filter(Boolean);
@@ -1928,7 +1929,6 @@ function startWelcomeBot() {
       }
       session.step = 'preview';
 
-      // ── عرض المعاينة ──────────────────────────────
       const targetLabel = session.isBroadcast
         ? `📢 <b>لجميع المستخدمين</b>`
         : `👤 <b>${session.targetUserId}</b>`;
@@ -1968,7 +1968,6 @@ function startWelcomeBot() {
     const data   = query.data || '';
     const chatId = query.message.chat.id;
 
-    // ── إلغاء الإرسال ─────────────────────────────────
     if (data.startsWith('cancel_send_msg:')) {
       const sid = data.replace('cancel_send_msg:', '').trim();
       delete msgSessions[sid];
@@ -1978,7 +1977,6 @@ function startWelcomeBot() {
       return;
     }
 
-    // ── إرسال الرسالة ─────────────────────────────────
     if (data.startsWith('do_send_msg:')) {
       const sid     = data.replace('do_send_msg:', '').trim();
       const session = msgSessions[sid];
@@ -1991,7 +1989,6 @@ function startWelcomeBot() {
       const { text: msgText, photo, buttons, isBroadcast, targetUserId } = session;
       const replyMarkup = buttons.length > 0 ? { inline_keyboard: buttons } : undefined;
 
-      // دالة مساعدة ترسل لمستخدم واحد
       async function sendToUser(uid) {
         try {
           if (photo) {
@@ -2004,7 +2001,6 @@ function startWelcomeBot() {
       }
 
       if (!isBroadcast) {
-        // ── إرسال لمستخدم واحد ──────────────────────
         const ok = await sendToUser(targetUserId);
         await adminReply(bot, chatId,
           ok
@@ -2012,14 +2008,11 @@ function startWelcomeBot() {
             : `❌ <b>فشل الإرسال</b> للمستخدم <code>${targetUserId}</code> — تحقق من الـ chat ID`
         );
       } else {
-        // ── بث لجميع المستخدمين ──────────────────────
         await adminReply(bot, chatId,
           '📢 <b>جاري إرسال الرسالة لجميع المستخدمين...</b>\n' +
           '💡 استخدم /broadcast_status لمتابعة التقدم في أي وقت'
         );
         try {
-          // جلب chat IDs فقط بدون تحميل كل بيانات المستخدمين
-          // نستخدم shallow=true عبر REST API لتجنب تحميل 139k مستخدم كاملاً
           let userIds = [];
           try {
             const dbUrl    = process.env.FIREBASE_DB_URL.replace(/\/$/, '');
@@ -2035,7 +2028,6 @@ function startWelcomeBot() {
           }
           let sent = 0, failed = 0;
 
-          // تهيئة حالة البث
           broadcastState = { total: userIds.length, sent: 0, failed: 0, current: 0, startedAt: Date.now(), done: false, doneAt: null };
 
           for (let i = 0; i < userIds.length; i++) {
@@ -2044,7 +2036,6 @@ function startWelcomeBot() {
             broadcastState.current = i + 1;
             broadcastState.sent    = sent;
             broadcastState.failed  = failed;
-            // تحديث رسالة تلقائية كل 100 مستخدم
             if ((i + 1) % 100 === 0) {
               const pct = ((( i + 1) / userIds.length) * 100).toFixed(1);
               const bar = buildProgressBar(i + 1, userIds.length, 15);
@@ -2053,7 +2044,6 @@ function startWelcomeBot() {
                 `📤 <b>${i + 1}</b>/${userIds.length} — ✅ ${sent} | ❌ ${failed}`
               );
             }
-            // تأخير بسيط لتجنب flood
             await new Promise(r => setTimeout(r, 50));
           }
 
@@ -2076,6 +2066,7 @@ function startWelcomeBot() {
       }
       return;
     }
+
     const msgId  = query.message.message_id;
 
     if (data.startsWith('ban_user:')) {
@@ -2143,7 +2134,7 @@ function startWelcomeBot() {
 // ==========================
 setInterval(async () => {
   if (systemPaused) return;
-  if (!WITHDRAWAL_ENABLED) return; // ⛔ نظام السحب موقوف
+  if (!WITHDRAWAL_ENABLED) return;
   try {
     const snap = await db.ref("withdrawQueue").orderByChild("status").equalTo("processing").once("value");
     const items = snap.val();
@@ -2160,10 +2151,10 @@ setInterval(async () => {
     }
     if (recovered > 0) { console.log(`♻️ Recovered ${recovered} stuck — triggering re-process`); setTimeout(() => processPendingWithdrawals(), 2000); }
   } catch (e) { console.log(`❌ stuckRecovery: ${e.message}`); }
-}, 10 * 60 * 1000); // ✅ تم تغييره من دقيقتين إلى 10 دقايق — stuck recovery نادر الحدوث
+}, 10 * 60 * 1000);
 
 // ==========================
-// 🔹 Flush Timer (كل 30 ثانية)
+// 🔹 Flush Timer
 // ==========================
 setInterval(async () => {
   if (!systemPaused && !isProcessing && WITHDRAWAL_ENABLED) {
@@ -2173,9 +2164,9 @@ setInterval(async () => {
 }, BATCH_FLUSH_SECONDS * 1000);
 
 // ==========================
-// 🔹 فحص الإيداعات كل 5 دقايق (بدل كل دقيقة — توفير Egress وCPU)
+// 🔹 فحص الإيداعات كل 5 دقايق
 // ==========================
-setInterval(() => checkDeposits(), 5 * 60 * 1000); // ✅ توفير ~80% من network requests
+setInterval(() => checkDeposits(), 5 * 60 * 1000);
 
 // ==========================
 // 🔹 Start
@@ -2197,19 +2188,16 @@ getWallet().then(async () => {
   console.log(`💰 Wallet balance: ${b.toFixed(4)} TON`);
   if (WITHDRAWAL_ENABLED) await processPendingWithdrawals();
   else console.log("⛔ Withdrawal system disabled — skipping initial process");
-  // فحص أول مرة عند البدء
   await checkDeposits();
 }).catch(err => { console.error("❌ Wallet error:", err.message); });
 
-// دورة معالجة كل 3 دقايق (بدل كل دقيقة — الـ child_added listener بيشغلها فوراً عند أي سحب جديد)
 setInterval(async () => {
   if (!systemPaused && WITHDRAWAL_ENABLED) await processPendingWithdrawals();
-}, 3 * 60 * 1000); // ✅ توفير CPU — الطلبات الجديدة تُعالج فوراً عبر listener
+}, 3 * 60 * 1000);
 
-// listener لأي سحب جديد
 db.ref("withdrawQueue").on("child_added", async (snap) => {
   if (systemPaused) return;
-  if (!WITHDRAWAL_ENABLED) return; // ⛔ نظام السحب موقوف
+  if (!WITHDRAWAL_ENABLED) return;
   const data = snap.val();
   if (data?.status === "pending" && !processingQueue.has(snap.key)) {
     console.log(`📢 New withdrawal: ${snap.key}`);
